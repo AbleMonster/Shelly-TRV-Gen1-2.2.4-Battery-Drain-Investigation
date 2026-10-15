@@ -2,126 +2,193 @@
 
 ## Scope
 
-This document describes the investigation of access-point selection and roaming
-behavior in Shelly TRV Gen1 firmware.
+This document describes the investigation of access-point selection, roaming,
+reconnection, RSSI handling, and their relationship to WLAN power management
+in Shelly TRV Gen1 firmware.
 
-The analysis focuses primarily on firmware 2.2.4, with relevant
-version-comparison results from:
+The analysis covers:
 
-- 2.1.0
-- 2.1.3
-- 2.1.8
-- 2.2.4
+- firmware 2.1.0
+- firmware 2.1.3
+- firmware 2.1.8
+- firmware 2.2.4
 
-The purpose is to determine:
+The main objectives are to determine:
 
-- how the TRV selects an access point during connection establishment
-- whether the Shelly host application itself selects the strongest access point
-- which BSSID and channel are supplied during connection establishment
-- whether the TRV can switch to another access point while already connected
-- what the `prevent_roaming` parameter controls
+- how the host application establishes a WLAN connection
+- whether the host explicitly selects the strongest access point
+- which BSSID and channel are supplied during connection
+- what `prevent_roaming` controls
+- whether an already associated TRV automatically moves to a stronger AP
 - what happens after an actual connection loss
-- how RSSI affects normal beacon power saving
-- whether AP selection is required for the observed 2.2.4 beacon-recovery loop
-- and what relevance these mechanisms may have to battery consumption
+- how RSSI influences normal beacon power saving
+- whether AP selection is required to explain the 2.2.4 Beacon Recovery behavior
+- whether AP behavior may still influence battery consumption
+- whether changing roaming behavior is currently justified
 
-This document intentionally separates:
+This document deliberately separates:
 
 ```text
-host application behavior
+Shelly host application behavior
 ```
 
 from:
 
 ```text
-protected WF200 behavior
+protected WF200 / WLAN firmware behavior
 ```
 
-because the exact internal AP-selection and roaming policy of the WF200 cannot
-be completely reconstructed from the host application image.
-
-No firmware images, complete proprietary functions or complete disassemblies
-are reproduced here.
+The host application exposes important connection parameters and control flow,
+but the complete internal AP-selection and roaming policy of the WF200 cannot
+be reconstructed from the host image alone.
 
 ---
 
-# 1. Summary
+# 1. Evidence Classification
 
-The Shelly host application does not explicitly select a particular access
-point based on strongest RSSI during normal connection establishment.
+This project uses four evidence levels.
 
-The WLAN scan can expose multiple BSSIDs and their RSSI values.
+## PROVEN
 
-However, the subsequent CONNECT request uses:
+Directly established from native firmware instructions, deterministic binary
+comparison, validated control flow, documented interface semantics, or
+sufficiently direct runtime evidence.
+
+## STRONGLY SUPPORTED
+
+Multiple independent findings support the conclusion, but some runtime,
+implementation, or environmental detail remains unresolved.
+
+## INFERENCE
+
+A technically plausible interpretation consistent with the available evidence,
+but not directly established.
+
+## UNKNOWN
+
+The available evidence is insufficient to determine the behavior, quantitative
+effect, or original developer intent.
+
+Runtime observations are described explicitly where relevant rather than using
+a separate evidence category.
+
+---
+
+# 2. Summary
+
+The Shelly TRV host application does not explicitly select one specific access
+point by strongest RSSI during normal connection establishment.
+
+The host performs or receives WLAN scan information containing:
+
+```text
+SSID
+BSSID
+Channel
+RSSI
+```
+
+but the subsequent CONNECT request uses:
 
 ```text
 BSSID   = FF:FF:FF:FF:FF:FF
 Channel = 0
 ```
 
-The host therefore does not pass one specific scanned BSSID or channel to the
-connection request.
+The host therefore does not constrain the request to one particular scanned
+BSSID or one particular channel.
 
-Concrete initial AP selection is delegated to the WLAN/WF200 subsystem.
+Concrete initial AP selection is delegated below the Shelly application layer.
 
-At the same time, the application sets:
+At the same time, the connection configuration uses:
 
 ```text
 prevent_roaming = 1
 ```
 
-Public Silicon Labs interface information indicates that this prevents
-autonomous firmware-managed roaming after association.
+which prevents autonomous WLAN-firmware roaming after association.
 
-No separate host-side background mechanism was identified that periodically:
+No separate host-side mechanism was identified that periodically:
 
 ```text
-scans for stronger AP
-        |
-        v
-selects stronger BSSID
-        |
-        v
+measures RSSI
+    |
+    v
+searches for a stronger AP
+    |
+    v
+selects another BSSID
+    |
+    v
 forces reassociation
 ```
 
-Therefore a weak but still functional AP can potentially remain associated for
-an extended period.
+A weak but still functional AP can therefore potentially remain associated.
 
 After an actual connection loss, the application returns to the normal
-scan-and-wildcard-CONNECT path, allowing the WLAN subsystem to select a
-compatible AP again.
+connection procedure and again issues a wildcard CONNECT request.
 
-RSSI affects the normal desired beacon-skip configuration:
+The WLAN subsystem then receives another opportunity to select a compatible
+access point.
 
-| RSSI | Desired beacon skip |
+RSSI directly affects the normal requested beacon-skip policy:
+
+| RSSI | `desired_beacon_skip` |
 |---|---:|
 | >= -69 dBm | 20 |
 | -79 to -70 dBm | 15 |
 | < -79 dBm | 10 |
 
-However, later runtime testing established an important constraint:
+AP selection can therefore affect normal WLAN power behavior indirectly through
+the resulting RF conditions.
 
-> The recurring firmware-2.2.4 beacon-recovery mechanism can occur with good
-> RSSI and `desired_beacon_skip = 20`.
+However, the current Beacon Recovery analysis shows that poor AP selection or
+weak RSSI is not required to explain the known 2.2.4 Recovery defects.
 
-Therefore poor AP selection or weak RSSI is **not required** for the observed
-beacon-recovery loop.
+The host-side problems currently separated as:
 
-AP selection remains potentially relevant to general WLAN energy consumption,
-but it is not currently established as a root cause of the battery-drain
-problem.
+```text
+C1a
+signed control-value validity
+
+C1b
+measurement-window validity
+
+C2
+post-Recovery control-evidence freshness
+```
+
+do not require persistent weak RSSI.
+
+In particular, C2 can sustain recurring Recovery after one qualifying event
+without requiring a new RF anomaly on every cycle.
+
+AP behavior therefore remains relevant to:
+
+```text
+normal WLAN efficiency
+retransmissions
+connection stability
+beacon-listening policy
+possible conditions preceding a first qualifying measurement
+```
+
+but is no longer a leading explanation for the persistent 2.2.4 Recovery loop.
+
+Its quantitative contribution to the historical battery-drain problem remains:
+
+**UNKNOWN**
 
 ---
 
-# 2. WLAN Scan
+# 3. WLAN Scan
 
-Before establishing a connection, the firmware performs a WLAN scan.
+Before establishing a connection, the firmware uses WLAN scan information.
 
 Multiple access points or BSSIDs advertising the configured SSID may appear in
 the scan results.
 
-The scan information includes values such as:
+Relevant information includes:
 
 ```text
 SSID
@@ -133,16 +200,14 @@ RSSI
 The host application can therefore observe that multiple BSSIDs exist for the
 same SSID.
 
-However, no host-side logic was identified that:
+However, no host-side data flow was identified that:
 
-1. collects matching BSSIDs
+1. collects all matching BSSIDs
 2. ranks them by RSSI
 3. selects the strongest result
-4. copies that BSSID into the subsequent CONNECT request
+4. copies that BSSID into the CONNECT request
 
-Scan results are retained in arrival order.
-
-No established data-flow path was found equivalent to:
+No established path equivalent to:
 
 ```text
 strongest matching scan result
@@ -151,7 +216,9 @@ strongest matching scan result
 CONNECT BSSID
 ```
 
-Likewise, no established path was found for:
+was identified.
+
+Likewise, no established path equivalent to:
 
 ```text
 first matching scan result
@@ -160,22 +227,30 @@ first matching scan result
 CONNECT BSSID
 ```
 
-## Evidence status
+was identified.
 
-| Finding | Status |
-|---|---|
-| Scan results contain BSSID, channel and RSSI | **PROVEN** |
-| Host explicitly selects strongest matching scan result | **NOT OBSERVED** |
-| Host explicitly selects first matching scan result | **NOT OBSERVED** |
+The existence of scan results therefore does not imply that the Shelly host
+application performs AP ranking itself.
+
+### Classification
+
+Scan results contain BSSID, channel and RSSI:
+
+**PROVEN**
+
+Host explicitly selects the strongest scanned BSSID:
+
+**UNKNOWN as a hypothetical behavior; no such host-side path was identified**
+
+Host explicitly selects the first matching BSSID:
+
+**UNKNOWN as a hypothetical behavior; no such host-side path was identified**
 
 ---
 
-# 3. Connection Establishment
+# 4. Connection Establishment
 
-During connection establishment, the host application supplies the configured
-network information to the WLAN subsystem.
-
-The relevant parameters are:
+During connection establishment, the host supplies approximately:
 
 ```text
 SSID            = configured SSID
@@ -192,7 +267,7 @@ The wildcard BSSID:
 FF:FF:FF:FF:FF:FF
 ```
 
-means that the host does not request one specific access point.
+means that the host does not request one specific AP.
 
 Likewise:
 
@@ -200,9 +275,9 @@ Likewise:
 Channel = 0
 ```
 
-does not constrain the connection request to one specific WLAN channel.
+does not constrain the request to one specific WLAN channel.
 
-The division of responsibility is therefore:
+The responsibility boundary is therefore:
 
 ```text
 Shelly host application
@@ -217,41 +292,55 @@ WLAN / WF200 subsystem
 concrete AP selection
 ```
 
-## Evidence status
+### Classification
+
+Wildcard BSSID in the examined connection path:
+
+**PROVEN**
+
+Channel 0 in the examined connection path:
+
+**PROVEN**
+
+Host does not specify one concrete AP in that CONNECT request:
+
+**PROVEN**
+
+Concrete AP selection occurs below the host application:
 
 **PROVEN**
 
 ---
 
-# 4. Initial Access-Point Selection
+# 5. Initial Access-Point Selection
 
-Because the host does not pass a specific BSSID or channel, the final initial
-AP selection occurs below the Shelly application layer.
+Because the host does not pass one specific BSSID or channel, the final initial
+AP-selection decision occurs below the Shelly application layer.
 
-The exact internal WF200 selection algorithm remains unresolved.
+The exact WF200 ranking strategy remains unknown.
 
-Possible internal criteria could include:
+Possible internal factors could include:
 
-- signal strength
-- scan-result ordering
+- RSSI
+- scan-result order
 - previously associated AP
-- previously used channel
-- internal scan cache
-- security or capability matching
-- channel preferences
-- internal connection history
+- cached scan state
+- security compatibility
+- channel information
+- connection history
+- internal firmware heuristics
 
-These are possible implementation factors, not established findings.
+These are possible implementation factors only.
 
-No evidence was found that the Shelly host itself performs this ranking.
+They are not established findings.
 
 Therefore:
 
 ```text
-host chooses strongest AP
+Shelly host always chooses strongest AP
 ```
 
-is not supported.
+is not supported by the identified host code.
 
 Likewise:
 
@@ -261,29 +350,42 @@ WF200 always chooses strongest AP
 
 has not been established.
 
-## Evidence status
+The strongest supported statement is:
 
-| Finding | Status |
-|---|---|
-| Host does not explicitly specify one BSSID | **PROVEN** |
-| Concrete initial selection is delegated below the host application | **PROVEN** |
-| Exact WF200 AP-ranking strategy | **UNRESOLVED** |
-| WF200 always selects strongest AP | **NOT PROVEN** |
-| WF200 always selects first scan result | **NOT PROVEN** |
+> The host submits a wildcard connection request and delegates the concrete AP
+> selection to the WLAN subsystem.
+
+### Classification
+
+Host does not explicitly specify one BSSID:
+
+**PROVEN**
+
+Concrete initial AP selection is delegated below the host:
+
+**PROVEN**
+
+Exact WF200 ranking algorithm:
+
+**UNKNOWN**
+
+WF200 always chooses the strongest AP:
+
+**UNKNOWN**
 
 ---
 
-# 5. Previous AP Information
+# 6. Previous AP Information
 
 The analysis also examined whether previously associated BSSID or channel
-information is reused during later reconnects.
+information is reused by the host during later reconnects.
 
-Old BSSID-related information may remain in host-side state or RAM.
+BSSID-related information can exist in host-side state.
 
-However, no identified host-side consumer uses this retained information to
-constrain the next CONNECT request.
+However, no identified host-side consumer was found that constrains the next
+CONNECT request using that information.
 
-No established path was found equivalent to:
+No established path equivalent to:
 
 ```text
 previous BSSID
@@ -292,7 +394,9 @@ previous BSSID
 next CONNECT BSSID
 ```
 
-or:
+was identified.
+
+Likewise:
 
 ```text
 previous channel
@@ -301,29 +405,37 @@ previous channel
 next CONNECT channel
 ```
 
-The reconnect path again uses:
+was not identified.
+
+The reconnect request again uses:
 
 ```text
 BSSID   = FF:FF:FF:FF:FF:FF
 Channel = 0
 ```
 
-It remains possible that the protected WF200 subsystem internally retains
-connection history or scan state.
+The protected WF200 subsystem could still retain internal connection history or
+scan information.
 
 That behavior cannot be established from the analyzed host application.
 
-## Evidence status
+### Classification
 
-| Finding | Status |
-|---|---|
-| Host explicitly reuses previous BSSID for reconnect | **NOT OBSERVED** |
-| Host explicitly reuses previous channel for reconnect | **NOT OBSERVED** |
-| WF200 may internally retain AP-selection state | **UNRESOLVED** |
+Host explicitly constrains reconnect to the previous BSSID:
+
+**UNKNOWN as a hypothetical behavior; no such path was identified**
+
+Host explicitly constrains reconnect to the previous channel:
+
+**UNKNOWN as a hypothetical behavior; no such path was identified**
+
+WF200 internally retains or prefers previous AP information:
+
+**UNKNOWN**
 
 ---
 
-# 6. `prevent_roaming`
+# 7. `prevent_roaming`
 
 During connection establishment, the host sets:
 
@@ -331,63 +443,67 @@ During connection establishment, the host sets:
 prevent_roaming = 1
 ```
 
-Public Silicon Labs WLAN interface information establishes the relevant
-distinction:
+The relevant WLAN interface semantics distinguish between:
 
 ```text
 prevent_roaming = 1
 ```
 
-prevents autonomous firmware-controlled roaming.
-
-By contrast:
+and:
 
 ```text
 prevent_roaming = 0
 ```
 
-permits autonomous firmware-controlled roaming.
+With roaming prevention enabled, autonomous WLAN-firmware roaming after
+association is prevented.
 
-This parameter should not be overinterpreted.
-
-Setting:
-
-```text
-prevent_roaming = 0
-```
-
-does not establish:
+Permitting roaming does not imply:
 
 ```text
-always use strongest AP
+always select strongest AP
 ```
 
-and does not reveal:
+The parameter does not by itself reveal:
 
 - roaming RSSI threshold
 - hysteresis
 - candidate ranking
 - scan timing
-- reassociation policy
+- reassociation timing
+- cached-AP preference
+- internal retry strategy
 
-Those decisions remain part of the internal WLAN implementation.
+Those remain implementation details of the WLAN subsystem.
 
-## Evidence status
+### Classification
 
-| Finding | Status |
-|---|---|
-| Stock firmware sets `prevent_roaming = 1` | **PROVEN** |
-| `prevent_roaming = 1` prevents autonomous WLAN-firmware roaming | **PROVEN** |
-| `prevent_roaming = 0` permits autonomous roaming | **PROVEN** |
-| `prevent_roaming = 0` guarantees strongest-AP selection | **NOT PROVEN** |
-| Exact WF200 roaming thresholds and policy | **UNRESOLVED** |
+Stock firmware sets `prevent_roaming = 1`:
+
+**PROVEN**
+
+`prevent_roaming = 1` prevents autonomous WLAN-firmware roaming:
+
+**PROVEN**
+
+Allowing roaming permits autonomous roaming behavior:
+
+**PROVEN**
+
+Allowing roaming guarantees strongest-AP selection:
+
+**UNKNOWN**
+
+Exact WF200 roaming thresholds and policy:
+
+**UNKNOWN**
 
 ---
 
-# 7. Host-Side Roaming
+# 8. Host-Side Roaming
 
-No separate host-side mechanism was identified that periodically scans for a
-better access point and forces reassociation based only on RSSI.
+No separate host-side mechanism was identified that continuously evaluates
+signal strength and moves an established connection to a stronger AP.
 
 No identified control flow corresponds to:
 
@@ -407,47 +523,42 @@ select stronger BSSID
 reassociate
 ```
 
-This is distinct from the reconnect path after an actual connection loss.
+This is distinct from reconnecting after an actual connection loss.
 
-The host therefore appears to rely on:
+The host therefore normally appears to retain the existing association until
+another event changes the connection state.
 
-```text
-existing association
-```
-
-until either:
-
-- the connection fails
-- another subsystem requests a reconnect
-- the WLAN subsystem changes association autonomously, if permitted
-
-With stock:
+With:
 
 ```text
 prevent_roaming = 1
 ```
 
-the last case is intentionally prevented.
+autonomous roaming by the WLAN firmware is also intentionally prevented.
 
-## Evidence status
+### Classification
 
-| Finding | Status |
-|---|---|
-| RSSI-based host roaming | **NOT OBSERVED** |
-| Background strongest-BSSID selection by host | **NOT OBSERVED** |
+Host-side RSSI-driven background roaming:
+
+**UNKNOWN as a hypothetical feature; no such mechanism was identified**
+
+Host-side background strongest-BSSID selection:
+
+**UNKNOWN as a hypothetical feature; no such mechanism was identified**
 
 ---
 
-# 8. Weak-but-Functional AP Retention
+# 9. Weak-but-Functional AP Retention
 
 The stock configuration permits a potentially important scenario.
 
-Consider:
+For example:
 
 ```text
 AP A
 RSSI ~ -80 dBm
 currently associated
+
 
 AP B
 same SSID
@@ -457,37 +568,38 @@ also available
 
 If AP A remains functional:
 
-- autonomous roaming is prevented by `prevent_roaming = 1`
-- no host-side stronger-AP selection mechanism was identified
+- autonomous roaming is prevented
+- no host-side strongest-AP roaming mechanism was identified
 - weak RSSI changes the requested beacon-skip configuration
 - weak RSSI alone was not found to force host-side reassociation
 
-Therefore continued association with a weaker but still functional AP is
-technically possible.
+Continued association with the weaker but still functional AP is therefore
+technically plausible.
 
-This does not prove that a particular tested TRV remained associated with a
+This does not establish that a particular tested TRV actually remained on a
 weaker AP.
 
-Direct observation of the associated BSSID is required for that conclusion.
+That requires direct observation of the associated BSSID.
 
-## Evidence status
+### Classification
 
-Weak-but-functional AP retention:
+Weak-but-functional AP retention is possible under the identified policy:
 
-**STRONG INFERENCE**
+**STRONGLY SUPPORTED**
 
-Specific tested TRV proven to remain on weaker AP:
+A particular test device remained associated with a weaker AP while a stronger
+compatible AP was available:
 
-**NOT PROVEN**
+**UNKNOWN unless the associated BSSID was directly observed**
 
 ---
 
-# 9. Behavior After Connection Loss
+# 10. Behavior After Connection Loss
 
 After an actual WLAN connection loss, the application clears the connected
 state and returns to its normal connection procedure.
 
-The subsequent request again uses:
+The next request again uses:
 
 ```text
 BSSID   = FF:FF:FF:FF:FF:FF
@@ -498,10 +610,7 @@ No host-side mechanism was identified that explicitly:
 
 - retries the previous BSSID first
 - retries the previous channel first
-- chooses the strongest scan result itself
-
-Therefore a reconnect provides the WLAN subsystem with another opportunity to
-select a compatible AP.
+- selects the strongest scan result itself
 
 Conceptually:
 
@@ -512,7 +621,7 @@ existing association
 connection loss
         |
         v
-scan
+scan / connection procedure
         |
         v
 wildcard CONNECT
@@ -521,38 +630,106 @@ wildcard CONNECT
 WF200 selects compatible AP
 ```
 
-An AP change can therefore occur after reconnect even though autonomous roaming
-was disabled during the previous established connection.
+A reconnect therefore gives the WLAN subsystem another opportunity to choose
+an AP.
 
-## Evidence status
+The selected AP may be the previous AP or another compatible AP.
 
-| Finding | Status |
-|---|---|
-| Reconnect returns to wildcard CONNECT | **PROVEN** |
-| Reconnect can provide an opportunity for another AP to be selected | **PROVEN** |
-| Reconnect necessarily selects another AP | **NOT PROVEN** |
-| Exact WF200 reconnect selection criteria | **UNRESOLVED** |
+### Classification
+
+Reconnect returns to wildcard CONNECT:
+
+**PROVEN**
+
+Reconnect creates another AP-selection opportunity:
+
+**PROVEN**
+
+Reconnect necessarily selects a different AP:
+
+**UNKNOWN**
+
+Exact WF200 reconnect-selection criteria:
+
+**UNKNOWN**
 
 ---
 
-# 10. RSSI Representation
+# 11. Associated BSSID Visibility
 
-The RSSI used by the firmware originates from the WLAN subsystem's signal
-strength information.
+The MAC address normally exposed by the TRV through HTTP is the TRV's own MAC
+address.
 
-The relevant host-side conversion is approximately:
+It is not the BSSID of the associated AP.
+
+However, the successful WLAN connection indication contains actual association
+information.
+
+The relevant `CONNECT_IND` event contains:
+
+```text
+BSSID
+Channel
+```
+
+The host therefore receives the selected BSSID and channel after successful
+association.
+
+This information is not normally exposed through `/status`.
+
+Conceptually:
+
+```text
+WF200 selects AP
+        |
+        v
+successful CONNECT_IND
+        |
+        +---- BSSID
+        |
+        +---- Channel
+        |
+        v
+host processes connection
+```
+
+This provides a useful diagnostic observation point.
+
+### Classification
+
+Associated BSSID is present in successful `CONNECT_IND`:
+
+**PROVEN**
+
+Associated channel is present:
+
+**PROVEN**
+
+Associated BSSID is normally exposed through `/status`:
+
+**UNKNOWN as a hypothetical interface feature; it was not identified in the
+examined status output**
+
+A direct diagnostic observation point exists:
+
+**PROVEN**
+
+---
+
+# 12. RSSI Representation
+
+The RSSI used by the host originates from WLAN signal-strength information.
+
+The identified conversion is approximately:
 
 ```text
 RSSI = ((uint8_t)RCPI >> 1) - 110
 ```
 
-However, `/status` does not request a completely new radio measurement for
-every HTTP request.
+The `/status` interface does not necessarily trigger a new instantaneous radio
+measurement for every request.
 
-The status interface reports a previously stored RSSI value.
-
-The underlying WLAN interface describes RCPI as being derived from recently
-received packets.
+It reports stored host-side RSSI state.
 
 Therefore:
 
@@ -568,75 +745,84 @@ and:
 
 must not automatically be treated as identical measurements.
 
-They can represent:
+They may represent different:
 
-- different times
-- different measurement contexts
-- different averaging histories
+- times
+- averaging histories
+- packet populations
+- connection states
+- measurement contexts
 
-This is particularly important when attempting to infer an AP change from an
-RSSI jump.
+This is particularly important when interpreting a sudden RSSI change.
+
+An RSSI jump alone does not prove that the associated BSSID changed.
 
 ---
 
-# 11. RSSI and Desired Beacon Skip
+# 13. RSSI and Desired Beacon Skip
 
-RSSI directly controls the normal `desired_beacon_skip` value.
+RSSI directly controls the normal `desired_beacon_skip` policy.
 
-The mapping is:
+The identified mapping is:
 
 ```text
 RSSI >= -69 dBm
 desired_beacon_skip = 20
 
+
 RSSI -70 ... -79 dBm
 desired_beacon_skip = 15
+
 
 RSSI < -79 dBm
 desired_beacon_skip = 10
 ```
 
-These thresholds control WLAN beacon power-saving configuration.
+These thresholds control the requested normal WLAN beacon power-saving policy.
 
-No evidence was found that the same thresholds directly trigger:
-
-```text
-scan
-```
-
-or:
+No corresponding host-side threshold behavior was identified that directly
+means:
 
 ```text
-AP reassociation
-```
-
-Therefore:
-
-```text
-weak RSSI
+RSSI < threshold
         |
         v
-lower desired_beacon_skip
+change AP
 ```
 
-is established.
-
-But:
+The established relationship is:
 
 ```text
-weak RSSI
-        |
-        v
-host changes AP
+RSSI
+ |
+ v
+desired_beacon_skip
 ```
 
-was not observed.
+not:
+
+```text
+RSSI
+ |
+ v
+host AP selection
+```
+
+### Classification
+
+RSSI controls `desired_beacon_skip`:
+
+**PROVEN**
+
+These same thresholds directly force host-side AP reassociation:
+
+**UNKNOWN as a hypothetical behavior; no such control path was identified**
 
 ---
 
-# 12. Nominal Beacon-Listening Intervals
+# 14. Desired Beacon Skip and Nominal Listening
 
-The configured skip values correspond to different nominal beacon-listening
+The requested skip values correspond to different nominal beacon-listening
 opportunities.
 
 The current interpretation is:
@@ -652,13 +838,13 @@ desired_beacon_skip = 10
 -> approximately every 11th beacon
 ```
 
-Therefore:
+Therefore, in nominal opportunity terms:
 
 ```text
 21 / 11 ~= 1.91
 ```
 
-Skip 10 represents approximately 1.91 times as many nominal listening
+so skip 10 represents approximately 1.91 times as many nominal listening
 opportunities as skip 20.
 
 Likewise:
@@ -667,26 +853,37 @@ Likewise:
 21 / 16 ~= 1.31
 ```
 
-Skip 15 represents approximately 1.31 times as many nominal listening
+so skip 15 represents approximately 1.31 times as many nominal listening
 opportunities as skip 20.
 
-These ratios describe nominal WLAN beacon-listening opportunities only.
+These ratios describe nominal WLAN beacon-listening opportunities.
 
-They do not directly describe:
+They do not directly quantify:
 
-- total WLAN energy consumption
-- total device energy consumption
+- WF200 energy consumption
 - host-MCU wake frequency
-- RF transmit activity
+- RF transmission
+- complete-device current
 - battery-life reduction
+
+### Classification
+
+Lower skip produces more nominal beacon-listening opportunities:
+
+**PROVEN**
+
+Total-device energy increases in exactly the same proportion:
+
+**UNKNOWN**
 
 ---
 
-# 13. Host MCU vs. WF200 Beacon Listening
+# 15. Host MCU vs. WF200 Beacon Listening
 
-The examined skip values use the same host-side sleep-release architecture.
+The identified skip values use the same general host-side sleep-release
+architecture.
 
-No separate host-MCU power-state path was identified for:
+No separate host-MCU power-state architecture was identified specifically for:
 
 ```text
 skip 10
@@ -694,8 +891,8 @@ skip 15
 skip 20
 ```
 
-Connection-maintenance activity can also be handled internally by the WLAN
-subsystem without requiring a host-MCU wake for every radio event.
+The WLAN subsystem can perform radio-side connection maintenance without
+requiring the host MCU to execute for every individual beacon event.
 
 Therefore:
 
@@ -709,136 +906,27 @@ does not imply:
 the same proportional increase in host-MCU wakeups
 ```
 
-A lower skip value is expected to increase radio-side listening opportunities.
+A lower skip value should be interpreted primarily as increased radio-side
+listening opportunity.
 
-The exact electrical effect on the complete TRV has not been measured.
+The quantitative electrical effect on the complete TRV remains:
 
-## Evidence status
-
-| Finding | Status |
-|---|---|
-| Same host sleep-release architecture for skip 10/15/20 | **PROVEN** |
-| Every additional beacon listen wakes host MCU | **NOT SUPPORTED** |
-| Lower skip increases nominal WF200 listening opportunities | **PROVEN** |
-| Proportional increase in total-device power | **NOT PROVEN** |
+**UNKNOWN**
 
 ---
 
-# 14. Associated BSSID Visibility
+# 16. AP Selection and Normal Energy Consumption
 
-The MAC address normally exposed by the TRV through HTTP is the TRV's own MAC
-address.
+AP selection can affect normal WLAN energy behavior through the resulting RF
+conditions.
 
-It is not the BSSID of the currently associated access point.
-
-However, the successful WLAN connection indication contains the actual
-association information.
-
-The relevant `CONNECT_IND` event contains:
+A supported conceptual chain is:
 
 ```text
-BSSID
-Channel
-```
-
-The host receives this information after successful association.
-
-The event structure is later released and the BSSID is not normally exposed
-through `/status`.
-
-Therefore `CONNECT_IND` provides a suitable diagnostic observation point.
-
-Conceptually:
-
-```text
-WF200 selects AP
+AP selection / AP retention
         |
         v
-successful CONNECT_IND
-        |
-        +---- BSSID
-        |
-        +---- Channel
-        |
-        v
-host processes event
-```
-
-A diagnostic modification could capture this information without modifying AP
-selection itself.
-
-## Evidence status
-
-| Finding | Status |
-|---|---|
-| Actual associated BSSID is present in successful `CONNECT_IND` | **PROVEN** |
-| Associated channel is present in successful `CONNECT_IND` | **PROVEN** |
-| Associated BSSID is exposed through `/status` | **NO** |
-| Diagnostic observation point exists | **PROVEN** |
-
----
-
-# 15. Real-Device RSSI Observations
-
-Real-device testing has shown substantial RSSI changes around connection or
-re-establishment events.
-
-Such changes are compatible with a different AP being selected.
-
-However:
-
-```text
-RSSI change
-```
-
-does not prove:
-
-```text
-BSSID change
-```
-
-because RSSI can also vary because of:
-
-- device orientation
-- propagation changes
-- environmental conditions
-- measurement timing
-- RCPI averaging
-- RF interference
-
-The firmware nevertheless provides a plausible mechanism for an AP change
-after reconnect:
-
-```text
-connection loss / restart
-        |
-        v
-new scan
-        |
-        v
-wildcard CONNECT
-        |
-        v
-WF200 selects compatible AP
-```
-
-Direct BSSID observation remains necessary to prove that a particular RSSI
-jump corresponds to a different AP.
-
----
-
-# 16. AP Selection and Energy Consumption
-
-AP selection is potentially relevant to battery consumption because radio
-conditions influence the normal power-save configuration.
-
-A supported chain is:
-
-```text
-AP selection / retention
-        |
-        v
-actual RF conditions
+RF conditions
         |
         v
 RSSI
@@ -850,95 +938,93 @@ desired_beacon_skip
 nominal beacon-listening frequency
 ```
 
-The links can be classified as:
+The evidence levels differ along this chain.
 
 ```text
-AP selection -> resulting RF conditions / RSSI
-STRONG INFERENCE
-
-RSSI -> desired_beacon_skip
-PROVEN
-
-desired_beacon_skip -> nominal listening opportunities
-PROVEN
-
-lower skip -> more nominal WF200 listening opportunities
-PROVEN
-
-additional WLAN activity -> additional electrical energy
-PLAUSIBLE
-
-additional energy -> observed long-term battery drain
-UNRESOLVED
-```
-
-Other possible weak-signal costs include:
-
-```text
-weak RF conditions
+AP choice influences RF conditions
         |
         v
-packet retransmissions
+INFERENCE in a specific deployment
+
+
+RSSI -> desired_beacon_skip
+        |
+        v
+PROVEN
+
+
+desired_beacon_skip -> nominal listening policy
+        |
+        v
+PROVEN
+```
+
+Weak RF conditions can also plausibly affect:
+
+```text
+retransmissions
 ```
 
 and:
 
 ```text
-weak RF conditions
+connection stability
         |
         v
-connection instability
-        |
-        v
-scan / reconnect
+reconnect / scan activity
 ```
 
-These mechanisms are technically plausible, but their contribution to the
-observed long-term battery drain has not been quantified.
+These mechanisms are technically plausible.
+
+Their quantitative contribution to the observed battery drain has not been
+measured.
 
 ---
 
 # 17. AP Selection and Beacon Recovery
 
-AP selection and the 2.2.4 beacon-recovery mechanism are separate mechanisms.
+AP selection and Beacon Recovery are separate host control mechanisms.
 
-The possible interaction is:
+The WLAN environment can influence both, but they must not be collapsed into
+one causal chain.
+
+The relevant high-level model is:
 
 ```text
-AP selection / retention
-        |
-        v
-actual WLAN conditions
-        |
-        +-------------------------+
-        |                         |
-        v                         v
-       RSSI                beacon reception
-        |                    statistics
-        v                         |
-desired_beacon_skip              v
-        |                  beacon_rx_count
-        v                         |
-normal listening                 v
-configuration              real_beacon_skip
-                                  |
-                                  v
-                           recovery predicate
-                                  |
-                                  v
-                            temporary state 1
+             AP selection / retention
+                       |
+                       v
+                 RF conditions
+                       |
+             +---------+---------+
+             |                   |
+             v                   v
+            RSSI          beacon reception
+             |              statistics
+             v                   |
+desired_beacon_skip             v
+             |           beacon_rx_count
+             v                   |
+normal requested                v
+power-save policy        real_beacon_skip
+                                 |
+                                 v
+                         Recovery predicate
+                                 |
+                                 v
+                         temporary state 1
 ```
 
-The following relationships are established:
+Established relationships include:
 
 - RSSI controls `desired_beacon_skip`
-- `desired_beacon_skip` controls the requested normal beacon-listening policy
-- `beacon_rx_count` is used in the `real_beacon_skip` calculation
-- qualifying `real_beacon_skip` values can trigger recovery
-- recovery requests temporary Active / Always-On WLAN operation
-- recovery temporarily restricts deeper host sleep states
+- `desired_beacon_skip` controls normal requested beacon power saving
+- WF200 beacon statistics provide the received-beacon counter
+- the counter is used in the host-side `real_beacon_skip` calculation
+- qualifying control values can trigger Recovery
+- Recovery requests temporary state 1 / ACTIVE operation
 
-However, the complete chain:
+What is not established is:
 
 ```text
 poor AP selection
@@ -947,61 +1033,217 @@ poor AP selection
 poor RSSI
         |
         v
-beacon recovery
+Beacon Recovery
 ```
 
-is not required by the observed runtime behavior.
+as a required chain.
 
 ---
 
-# 18. Recovery at Good RSSI
+# 18. Updated Beacon-Recovery Findings
 
-Later runtime testing provided a particularly important result.
+The Beacon Recovery investigation has since identified three distinct
+host-side validity problems.
 
-A firmware-2.2.4 device running the isolated periodic-mDNS patch continued to
-show recurring:
+## C1a — Signed Control-Value Validity
 
-```text
-Beacon skip error! Attempt recovery
-```
+The stored `real_beacon_skip` byte is read as signed for the Recovery control
+predicate.
 
-while reported RSSI was approximately:
+This creates additional qualifying values through signed narrowing.
 
-```text
--58 to -59 dBm
-```
-
-At this signal strength, the normal policy selected:
+For a fresh valid calculation:
 
 ```text
-desired_beacon_skip = 20
+delta = 3
+600 / 3 = 200
+byte = 0xC8
+signed = -56
 ```
 
-The recovery sequence still occurred approximately once per minute.
+and:
 
-This establishes:
+```text
+delta = 4
+600 / 4 = 150
+byte = 0x96
+signed = -106
+```
 
-> Weak RSSI is not a necessary condition for the observed 2.2.4
-> beacon-recovery loop.
+Both satisfy the stock signed:
 
-It also weakens the hypothesis that the recurring recovery is primarily a
-consequence of a TRV being trapped on a weak access point.
+```text
+<= 2
+```
 
-This does not establish that RF conditions are completely irrelevant to beacon
-statistics.
+control test.
 
-It establishes only that the known recurring recovery can occur without weak
-RSSI.
+The resulting stock fresh-trigger domain is:
 
-## Evidence status
+```text
+delta = 3
+delta = 4
+delta = 201 ... 600
+```
 
-**RUNTIME CONFIRMED**
+This is a host-side control-validity defect.
+
+It does not require weak RSSI.
+
+### Classification
+
+C1a behavior:
+
+**PROVEN**
+
+Interpretation as a genuine control-validity defect:
+
+**STRONGLY SUPPORTED**
 
 ---
 
-# 19. Consequence for the Battery-Drain Investigation
+# 19. C1b — Measurement-Window Validity
 
-Before the good-RSSI runtime result, a plausible working hypothesis was:
+The Beacon Recovery calculation uses:
+
+```text
+600 / (current_received - previous_received)
+```
+
+but the stored previous counter does not carry an elapsed-time measurement.
+
+Certain power-management and maintenance conditions can suppress a scheduled
+sample while preserving the old baseline.
+
+The next successful calculation can therefore compare counters spanning more
+than the nominal measurement interval while still using the fixed constant:
+
+```text
+600
+```
+
+For example, shared PM override periods can preserve the previous baseline
+across skipped measurement opportunities.
+
+Therefore the counter difference is not guaranteed to represent the interval
+assumed by the fixed calculation.
+
+This is a host-side measurement-validity issue.
+
+Again, weak RSSI is not required.
+
+### Classification
+
+Baseline age is not explicitly tracked:
+
+**PROVEN**
+
+Skipped measurement opportunities can preserve the stock baseline:
+
+**PROVEN**
+
+Interpretation as a genuine measurement-validity defect:
+
+**STRONGLY SUPPORTED**
+
+Exact cause of the first observed field trigger:
+
+**UNKNOWN**
+
+---
+
+# 20. C2 — Post-Recovery Freshness Failure
+
+The strongest result for the persistent Recovery loop is C2.
+
+After a qualifying Recovery:
+
+```text
+previous_received = 0
+```
+
+while the qualifying cached:
+
+```text
+real_beacon_skip
+```
+
+is retained.
+
+At the next successful measurement:
+
+```text
+previous_received == 0
+```
+
+causes the current received counter to be installed as the new baseline.
+
+No fresh ratio is calculated.
+
+However, stock control flow then evaluates the previously retained
+`real_beacon_skip`.
+
+If that historical value remains qualifying:
+
+```text
+Recovery triggers again
+```
+
+and:
+
+```text
+previous_received
+```
+
+is cleared again.
+
+Conceptually:
+
+```text
+qualifying Recovery
+        |
+        v
+P = 0
+R retained
+        |
+        v
+next successful sample
+        |
+        v
+P = current
+no fresh R calculation
+        |
+        v
+historical R tested
+        |
+        v
+Recovery again
+        |
+        v
+P = 0
+```
+
+This creates a self-sustaining loop.
+
+No new weak-RSSI event is required.
+
+No AP change is required.
+
+No mDNS event is required.
+
+No failed PM restoration is required.
+
+### Classification
+
+C2 stale-state loop in the identified stock control flow:
+
+**PROVEN**
+
+---
+
+# 21. Consequence for AP-Selection Hypotheses
+
+Before C1a/C1b/C2 were understood, a plausible working hypothesis was:
 
 ```text
 weak AP retained
@@ -1010,70 +1252,221 @@ weak AP retained
 weak RSSI
         |
         v
-lower desired beacon skip
+lower desired_beacon_skip
         |
         v
 abnormal beacon statistics
         |
         v
-recovery
+Recovery
         |
         v
 additional battery consumption
 ```
 
-The later runtime result requires this model to be revised.
+That chain is no longer required to explain the known recurring behavior.
 
 The better-supported model is:
 
 ```text
-                AP selection
-                     |
-                     v
-              RF conditions
-                     |
-                     v
-                   RSSI
-                     |
-                     v
-          desired_beacon_skip
-                     |
-                     v
-        normal WLAN energy cost
+AP selection
+     |
+     v
+RF conditions
+     |
+     v
+RSSI
+     |
+     v
+desired_beacon_skip
+     |
+     v
+normal WLAN energy behavior
 ```
 
-while the 2.2.4 recovery mechanism has a separate input:
+while separately:
 
 ```text
 WF200 beacon statistics
         |
         v
-beacon_rx_count delta
+host measurement
+        |
+        +---- C1a control validity
+        |
+        +---- C1b measurement-window validity
         |
         v
-real_beacon_skip
+qualifying Recovery
         |
         v
-recovery predicate
-        |
-        v
-state 1 recovery
+C2 stale-state recurrence
 ```
 
-The two paths may interact through the underlying WLAN environment, but poor
-RSSI is not required for the second path.
+The paths share the WLAN environment.
 
-Therefore AP selection is no longer a leading explanation for the recurring
-2.2.4 recovery loop.
+They are not the same control path.
 
 ---
 
-# 20. Version Comparison
+# 22. First Trigger vs. Persistent Recovery
 
-The relevant host-side AP-selection behavior was compared across the analyzed
-firmware versions.
+It is important to separate:
 
-The important connection characteristics remain substantially consistent:
+```text
+Why did the first qualifying Recovery occur?
+```
+
+from:
+
+```text
+Why does Recovery then repeat?
+```
+
+The second question is substantially answered by C2.
+
+The first remains unresolved in actual field operation.
+
+Possible contributors to the first qualifying measurement can include:
+
+- genuine unusual beacon reception
+- measurement-window aging
+- connection-state transitions
+- PM override timing
+- radio-internal behavior
+- AP-specific behavior
+- RF conditions
+- other still-unidentified events
+
+AP selection therefore remains potentially relevant to the first-trigger
+environment.
+
+But no evidence currently establishes:
+
+```text
+poor AP selection
+```
+
+as the actual cause of the first observed trigger.
+
+### Classification
+
+Persistent recurrence requires continued poor AP conditions:
+
+**UNKNOWN as a hypothetical requirement; C2 demonstrates that such a
+requirement is unnecessary**
+
+Poor AP selection caused the first field trigger:
+
+**UNKNOWN**
+
+---
+
+# 23. RSSI Is Not a Recovery Predicate
+
+The normal desired-skip thresholds are:
+
+```text
+>= -69 dBm      -> 20
+-79 .. -70 dBm -> 15
+< -79 dBm       -> 10
+```
+
+The Beacon Recovery predicate does not directly compare:
+
+```text
+RSSI
+```
+
+or:
+
+```text
+desired_beacon_skip
+```
+
+against the calculated real value.
+
+There is no identified predicate equivalent to:
+
+```text
+if real_beacon_skip differs from desired_beacon_skip:
+    recover
+```
+
+Instead, Recovery is based on the cached/calculated `real_beacon_skip` control
+value.
+
+This matters because:
+
+```text
+good RSSI
+```
+
+does not structurally disable the Recovery predicate.
+
+Likewise:
+
+```text
+desired_beacon_skip = 20
+```
+
+does not structurally prevent Recovery.
+
+The current `.77` Patch-B observations, for example, show recurring stock
+Beacon Recovery around:
+
+```text
+RSSI approximately -75 ... -77 dBm
+desired_beacon_skip = 15
+```
+
+These observations are sufficient to demonstrate that the mDNS-only patch does
+not remove Beacon Recovery.
+
+They should not be conflated with older device-role observations.
+
+---
+
+# 24. Historical Good-RSSI Observation
+
+Separate stock observations have shown that Beacon Recovery is not restricted
+to obviously weak RSSI conditions.
+
+This supports the broader conclusion:
+
+> Weak RSSI is not a necessary structural prerequisite for the 2.2.4 Recovery
+> mechanism.
+
+However, device identities and experimental configurations must be kept
+separate.
+
+In particular, the current `.77` Patch-B test role should not be described
+using an older unrelated:
+
+```text
+-58 ... -59 dBm
+desired_beacon_skip = 20
+```
+
+observation.
+
+The important scientific conclusion does not depend on assigning that older
+observation to `.77`.
+
+---
+
+# 25. Version Comparison
+
+The host-side AP-selection behavior was compared across:
+
+```text
+2.1.0
+2.1.3
+2.1.8
+2.2.4
+```
+
+The relevant connection characteristics remain substantially consistent:
 
 ```text
 wildcard BSSID
@@ -1083,28 +1476,16 @@ prevent_roaming = 1
 
 No version-specific host-side strongest-AP selection mechanism was identified.
 
-Therefore the current analysis does not provide evidence that a new
-host-controlled AP-selection policy was introduced at the known firmware
-boundaries associated with the battery investigation.
+Therefore the firmware versions should not be differentiated on the basis of a
+host-side AP-ranking algorithm that has not been found.
 
-This is important because:
+However, this does not imply identical complete WLAN behavior.
 
-```text
-2.1.0
-2.1.3
-2.1.8
-2.2.4
-```
-
-should not be differentiated on the basis of a host-side strongest-AP
-algorithm that has not been found.
-
-The protected WF200 image does change at later version boundaries, so internal
-WLAN behavior cannot be assumed to be identical across every version.
+The protected WF200 image changes at later firmware boundaries.
 
 ---
 
-# 21. Protected WF200 Boundary
+# 26. Protected WF200 Boundary
 
 The exact AP-selection and roaming implementation resides partly inside the
 protected WLAN subsystem.
@@ -1116,7 +1497,7 @@ Within the analyzed firmware set:
 2.1.3
 ```
 
-use the same protected WF200 image.
+use the same identified protected WF200 image generation.
 
 The protected image changes in:
 
@@ -1130,41 +1511,120 @@ and changes again in:
 2.2.4
 ```
 
+The corresponding identified WLAN stack evolution includes:
+
+```text
+2.1.3
+FMAC 3.3.2
+WF200 3.12.2
+
+2.1.8
+FMAC 3.4.1
+WF200 3.14.0
+
+2.2.4
+FMAC 3.7.0
+WF200 3.16.1
+```
+
 Therefore:
 
 ```text
 same host CONNECT parameters
 ```
 
-does not necessarily prove:
+does not prove:
 
 ```text
 identical internal AP-selection behavior
 ```
 
-across all four versions.
+across all firmware versions.
 
-For example, the protected firmware could theoretically change:
+Internal changes could potentially affect:
 
 - scan-result ranking
 - cached-AP preference
 - retry strategy
-- roaming implementation
 - association timing
+- radio power-management behavior
+- error handling
 
-without changing the visible host CONNECT parameters.
+No specific protected-firmware AP-ranking change has been established.
 
-No such specific protected-firmware AP-selection change has currently been
-established.
+### Classification
+
+Protected WLAN implementation changes across later firmware versions:
+
+**PROVEN**
+
+Those changes altered AP ranking in a particular way:
+
+**UNKNOWN**
 
 ---
 
-# 22. Roaming-Patch Feasibility
+# 27. D3 Power-Save Error Events
 
-Static analysis identified the application-side `prevent_roaming` assignment
-as a technically minimal experimental modification.
+Firmware 2.2.4 contains host-visible WLAN power-save error reasons associated
+with the protected WLAN subsystem.
 
-Stock behavior supplies:
+Identified reasons include conditions corresponding to:
+
+```text
+0
+AP did not provide buffered unicast after PS-Poll
+
+1
+AP did not provide buffered unicast after U-APSD trigger
+
+2
+AP indicated buffered unicast but no frame was delivered
+across repeated beacons
+
+3
+unstable AP beacon timing / beacon-window adjustment
+```
+
+These events demonstrate that AP behavior and beacon timing can influence
+radio-side power-save operation.
+
+However, no direct host control-flow edge has been established:
+
+```text
+D3 event
+    |
+    v
+Beacon Recovery
+```
+
+Therefore D3 events should not currently be treated as the proven cause of
+Beacon Recovery.
+
+Radio-internal effects on received-beacon statistics remain possible.
+
+### Classification
+
+D3 power-save error reasons exist:
+
+**PROVEN**
+
+Direct D3-to-Recovery host control edge:
+
+**UNKNOWN; no such direct edge has been established**
+
+Indirect effect on beacon statistics:
+
+**INFERENCE**
+
+---
+
+# 28. Roaming-Patch Feasibility
+
+The host-side `prevent_roaming` setting provides a technically small
+experimental modification point.
+
+Stock behavior uses:
 
 ```text
 prevent_roaming = 1
@@ -1176,61 +1636,46 @@ A modification to:
 prevent_roaming = 0
 ```
 
-would permit autonomous WF200 roaming.
+would permit autonomous WLAN-firmware roaming.
 
-The identified host-side modification is compatible with a minimal
-single-immediate change.
-
-However, such a patch would not:
+Such a modification would not:
 
 - implement a custom strongest-AP algorithm
-- guarantee selection of the strongest AP
-- reveal the WF200 roaming threshold
+- guarantee strongest-AP selection
+- reveal WF200 roaming thresholds
+- correct C1a
+- correct C1b
+- correct C2
+- suppress periodic mDNS
 - guarantee lower power consumption
-- correct the 2.2.4 beacon-statistics interpretation
-- suppress the known beacon-recovery mechanism
 
-Therefore the technical feasibility of the modification should be separated
-from its research priority.
+The technical feasibility of changing the setting must therefore be separated
+from the scientific value of doing so.
 
-## Evidence status
+### Classification
 
-Minimal host-side roaming modification feasible:
+Minimal host-side roaming modification is technically feasible:
 
 **PROVEN**
 
-Result would always select strongest AP:
+It would always select the strongest AP:
 
-**NOT PROVEN**
+**UNKNOWN**
 
-Battery improvement:
+It would improve battery life:
 
-**UNRESOLVED**
+**UNKNOWN**
 
 ---
 
-# 23. Why a Roaming Patch Is Not Currently a Priority
+# 29. Why a Roaming Patch Is Not a Current Priority
 
-The later battery-drain investigation changed the experimental priority.
+Changing roaming policy introduces another experimental variable.
 
-The recurring 2.2.4 recovery mechanism has now been observed with:
-
-```text
-good RSSI
-desired_beacon_skip = 20
-```
-
-and the recovery can be directly suppressed using the isolated beacon-recovery
-Patch A.
-
-Periodic mDNS activity can independently be suppressed using Patch B.
-
-This provides cleaner experimental isolation than changing AP behavior.
-
-A roaming patch would introduce another variable:
+Conceptually:
 
 ```text
-different association policy
+different roaming policy
         |
         v
 possibly different AP
@@ -1242,26 +1687,55 @@ different RF conditions
 different WLAN workload
 ```
 
-That could make battery comparisons harder to interpret.
+This can make battery comparisons harder to interpret.
 
-Therefore a roaming patch remains technically interesting, but is not
-currently required for the main battery-drain experiment.
+Meanwhile, the main recurring mechanisms now have cleaner isolated research
+paths:
+
+```text
+Patch B
+        |
+        v
+periodic mDNS workload
+
+
+Patch C-C
+        |
+        v
+Beacon Recovery validity semantics
+```
+
+AP-selection modification is not required to test either mechanism.
+
+A roaming patch therefore remains technically interesting but secondary.
+
+The preferred order is:
+
+```text
+observe AP behavior first
+        |
+        v
+establish whether AP retention is actually occurring
+        |
+        v
+only then consider changing roaming policy
+```
 
 ---
 
-# 24. Diagnostic BSSID Instrumentation
+# 30. Diagnostic BSSID Instrumentation
 
-If AP-selection behavior becomes relevant again, diagnostic instrumentation is
-preferable to immediately changing roaming policy.
+If AP behavior becomes experimentally important, direct observation is
+preferable to inference from RSSI.
 
-The successful connection event already contains:
+The successful connection event already provides:
 
 ```text
 BSSID
 Channel
 ```
 
-A diagnostic build could capture:
+A diagnostic build could record:
 
 ```text
 timestamp
@@ -1278,65 +1752,82 @@ This would directly answer:
 Which AP did the TRV actually associate with?
 ```
 
-without modifying:
+without changing:
 
 - AP selection
 - roaming policy
 - RSSI thresholds
 - beacon-skip policy
-- beacon recovery
+- mDNS behavior
+- Beacon Recovery
 
-This is a cleaner experiment than inferring AP changes from RSSI alone.
+This is scientifically cleaner than inferring AP changes from RSSI alone.
 
 ---
 
-# 25. Suggested Future AP Experiment
+# 31. Suggested AP Experiment
 
-AP-specific testing is not currently required for the main Patch A+B battery
-comparison.
+If AP behavior is investigated later, the preferred sequence is observational
+before interventional.
 
-If AP behavior is investigated later, the clean sequence would be:
+## Phase 1 — Association instrumentation
 
-## Phase 1 — Diagnostic observation
-
-Record the actual associated:
+Record:
 
 ```text
+timestamp
 BSSID
-Channel
+channel
 RSSI
 ```
 
-without changing connection behavior.
+for each successful association.
 
-## Phase 2 — Weak-AP retention test
+Do not change roaming behavior.
 
-Create:
+---
+
+## Phase 2 — Weak-but-functional AP retention
+
+Create a controlled environment:
 
 ```text
 AP A
 weak but functional
+
 
 AP B
 same SSID
 substantially stronger
 ```
 
-while the TRV remains associated.
+while the TRV remains associated with AP A.
 
-Observe whether the BSSID changes.
+Observe:
 
-With stock:
+```text
+BSSID
+RSSI
+connection state
+```
+
+With:
 
 ```text
 prevent_roaming = 1
 ```
 
-no autonomous WF200 roaming is expected.
+the hypothesis is that autonomous WLAN-firmware roaming will not occur.
 
-## Phase 3 — Reconnect test
+The experiment should verify the actual BSSID rather than relying on RSSI.
 
-Make the current AP unavailable and observe:
+---
+
+## Phase 3 — Forced connection loss
+
+Make the currently associated AP unavailable.
+
+Observe:
 
 ```text
 old BSSID
@@ -1348,12 +1839,16 @@ connection loss
 wildcard reconnect
         |
         v
-new BSSID
+selected BSSID
 ```
+
+This tests whether the reconnect selects another compatible AP.
+
+---
 
 ## Phase 4 — Optional roaming experiment
 
-Only if needed, compare:
+Only if scientifically justified, compare:
 
 ```text
 prevent_roaming = 1
@@ -1365,213 +1860,541 @@ against:
 prevent_roaming = 0
 ```
 
-while recording the same WLAN and battery-related metrics.
+while recording:
 
-This sequence separates observation from intervention.
+```text
+BSSID
+channel
+RSSI
+reconnect events
+beacon policy
+battery voltage
+network availability
+```
+
+This separates observation from intervention.
 
 ---
 
-# 26. Evidence Classification
+# 32. Relationship to Patch B
 
-| Finding | Status |
+Patch B suppresses the targeted recurring connected-maintenance mDNS restart.
+
+It does not intentionally modify:
+
+```text
+AP selection
+prevent_roaming
+RSSI thresholds
+desired_beacon_skip
+Beacon Recovery
+```
+
+The Patch-B device therefore remains useful for studying AP behavior without
+the targeted recurring mDNS workload.
+
+Importantly, recurring Beacon Recovery continues on the Patch-B device.
+
+This demonstrates that the targeted periodic mDNS restart is not required for
+the observed Recovery loop under the tested conditions.
+
+It does not establish that AP or RF conditions have no influence on the first
+qualifying measurement.
+
+---
+
+# 33. Relationship to Patch A
+
+Patch A bypasses the Beacon Recovery action.
+
+It was useful as a mechanism-isolation experiment.
+
+However, Patch A suppresses both:
+
+```text
+invalid Recovery
+```
+
+and potentially:
+
+```text
+legitimate Recovery
+```
+
+It therefore does not correct the underlying validity semantics.
+
+Patch A should now be treated as:
+
+```text
+historical Recovery-isolation patch
+```
+
+rather than:
+
+```text
+preferred final Recovery correction
+```
+
+This distinction also changes the role of AP research.
+
+There is no longer a need to change AP behavior simply to prevent the recurring
+Recovery loop.
+
+---
+
+# 34. Relationship to Patch C-C
+
+Patch C is the research family intended to correct the Beacon Recovery
+validity problems while preserving legitimate Recovery.
+
+The current preferred implementation candidate is:
+
+```text
+Patch C-C
+```
+
+Its behavior-level objectives are:
+
+```text
+C1a
+use unsigned control interpretation for real_beacon_skip
+
+C1b
+invalidate the beacon counter baseline across invalid measurement epochs
+
+C2
+prevent a baseline-only sample from acting on historical Recovery evidence
+```
+
+while preserving:
+
+```text
+fresh legitimate Recovery
+diagnostic real_beacon_skip state
+normal PM restoration
+```
+
+Patch C-C does not intentionally change:
+
+```text
+AP selection
+prevent_roaming
+RSSI thresholds
+desired_beacon_skip
+mDNS
+```
+
+Static pre-build qualification has passed.
+
+No Patch C-C firmware has yet been hardware-qualified.
+
+Therefore:
+
+```text
+runtime correctness
+battery improvement
+network availability
+OTA / GBL acceptance
+```
+
+remain to be established experimentally.
+
+---
+
+# 35. AP Selection and C1a
+
+C1a is caused by the host's signed interpretation of the stored
+`real_beacon_skip` byte.
+
+This defect exists independently of AP selection.
+
+For example:
+
+```text
+delta = 3
+```
+
+or:
+
+```text
+delta = 4
+```
+
+can become qualifying through signed-byte interpretation.
+
+No particular RSSI or BSSID is required by that arithmetic.
+
+AP conditions could influence the received-beacon counter.
+
+They do not create the signedness defect itself.
+
+---
+
+# 36. AP Selection and C1b
+
+C1b concerns whether:
+
+```text
+current_received - previous_received
+```
+
+represents the time interval assumed by the fixed:
+
+```text
+600
+```
+
+calculation.
+
+AP selection does not create the missing elapsed-time information.
+
+However, AP or RF conditions could potentially influence:
+
+- connection stability
+- PM transitions
+- radio-side behavior
+- beacon reception
+- reconnects
+
+These may affect the circumstances under which a baseline becomes invalid.
+
+Therefore:
+
+```text
+AP selection causes C1b
+```
+
+is not supported.
+
+But:
+
+```text
+AP / RF conditions may influence the measurement environment
+```
+
+remains plausible.
+
+---
+
+# 37. AP Selection and C2
+
+C2 is the clearest separation.
+
+Once stock firmware reaches:
+
+```text
+P = 0
+R = qualifying historical value
+```
+
+the identified host control flow can repeat Recovery without a fresh
+qualifying ratio.
+
+Therefore persistent weak RSSI is unnecessary.
+
+Persistent association with a poor AP is unnecessary.
+
+A fresh RF anomaly every minute is unnecessary.
+
+This means AP selection cannot be required to explain the self-sustaining
+portion of the Recovery loop.
+
+AP behavior may still matter before the first qualifying event.
+
+It does not explain the host-side stale-state recurrence itself.
+
+---
+
+# 38. Historical Battery Drain
+
+The AP-selection mechanism cannot currently be identified as the sole cause of
+the historical Shelly TRV Gen1 battery drain.
+
+Several independent mechanisms are now under investigation:
+
+```text
+AP / RF conditions
+        |
+        +-- normal WLAN efficiency
+        +-- retransmissions
+        +-- reconnect behavior
+        +-- desired beacon-skip policy
+
+
+periodic mDNS
+        |
+        +-- recurring network workload
+
+
+Beacon Recovery
+        |
+        +-- C1a
+        +-- C1b
+        +-- C2
+        +-- temporary ACTIVE recovery workload
+
+
+WUP / EM2 candidate
+        |
+        +-- inherited low-level sleep-resource behavior
+```
+
+These mechanisms may contribute differently.
+
+No evidence currently supports collapsing them into one single root cause.
+
+---
+
+# 39. Evidence Summary
+
+| Finding | Classification |
 |---|---|
-| TRV scan can observe multiple BSSIDs advertising the same SSID | **PROVEN** |
-| Scan results contain BSSID, channel and RSSI | **PROVEN** |
-| Host explicitly selects strongest scan result | **NOT OBSERVED** |
-| Host explicitly selects first scan result | **NOT OBSERVED** |
+| Scan information contains BSSID, channel and RSSI | **PROVEN** |
 | CONNECT uses wildcard BSSID | **PROVEN** |
 | CONNECT uses channel 0 | **PROVEN** |
-| Concrete initial AP selection is delegated below the host application | **PROVEN** |
-| Exact internal WF200 AP-ranking algorithm is known | **UNRESOLVED** |
-| Host reuses previous BSSID to constrain reconnect | **NOT OBSERVED** |
-| Host reuses previous channel to constrain reconnect | **NOT OBSERVED** |
-| WF200 may internally retain AP-selection state | **UNRESOLVED** |
-| Stock firmware sets `prevent_roaming = 1` | **PROVEN** |
+| Host explicitly selects strongest scan result | **UNKNOWN; no such path identified** |
+| Concrete initial AP selection occurs below host application | **PROVEN** |
+| Exact WF200 AP-ranking algorithm | **UNKNOWN** |
+| WF200 always chooses strongest AP | **UNKNOWN** |
+| Host constrains reconnect to previous BSSID | **UNKNOWN; no such path identified** |
+| Host constrains reconnect to previous channel | **UNKNOWN; no such path identified** |
+| WF200 internally prefers previous AP | **UNKNOWN** |
+| Stock sets `prevent_roaming = 1` | **PROVEN** |
 | `prevent_roaming = 1` prevents autonomous WLAN-firmware roaming | **PROVEN** |
-| `prevent_roaming = 0` permits autonomous roaming | **PROVEN** |
-| `prevent_roaming = 0` guarantees strongest-AP selection | **NOT PROVEN** |
-| Host performs background strongest-BSSID roaming | **NOT OBSERVED** |
-| Weak-but-functional AP retention is technically possible | **STRONG INFERENCE** |
-| Connection loss returns to scan + wildcard CONNECT | **PROVEN** |
-| Reconnect provides another opportunity for AP selection | **PROVEN** |
+| Allowing roaming guarantees strongest-AP selection | **UNKNOWN** |
+| Host performs background strongest-BSSID roaming | **UNKNOWN; no such mechanism identified** |
+| Weak-but-functional AP retention is possible | **STRONGLY SUPPORTED** |
+| Connection loss returns to wildcard connection procedure | **PROVEN** |
+| Reconnect provides another AP-selection opportunity | **PROVEN** |
+| Reconnect necessarily chooses another AP | **UNKNOWN** |
 | RSSI controls `desired_beacon_skip` | **PROVEN** |
-| RSSI thresholds directly trigger AP change | **NOT OBSERVED** |
+| RSSI thresholds directly force AP change | **UNKNOWN; no such host path identified** |
 | Skip 20 corresponds nominally to approximately every 21st beacon | **PROVEN** |
 | Skip 15 corresponds nominally to approximately every 16th beacon | **PROVEN** |
 | Skip 10 corresponds nominally to approximately every 11th beacon | **PROVEN** |
-| Skip 10 provides approximately 1.91x the nominal listening opportunities of skip 20 | **PROVEN** |
-| Lower skip necessarily wakes host MCU proportionally more often | **NOT SUPPORTED** |
 | Lower skip increases nominal WF200 listening opportunities | **PROVEN** |
-| Lower skip causes proportional total-device power increase | **NOT PROVEN** |
+| Lower skip proportionally increases complete-device current | **UNKNOWN** |
 | Associated BSSID is present in successful `CONNECT_IND` | **PROVEN** |
-| Associated BSSID is exposed through `/status` | **NO** |
-| Recurring 2.2.4 beacon recovery can occur with good RSSI | **RUNTIME CONFIRMED** |
-| Weak RSSI is required for recurring beacon recovery | **DISPROVEN FOR TESTED CONDITIONS** |
-| Poor AP selection is required for recurring beacon recovery | **NOT SUPPORTED** |
-| Minimal `prevent_roaming` modification is technically feasible | **PROVEN** |
-| Roaming modification would improve battery life | **UNRESOLVED** |
-| AP-selection policy causes the historical battery drain | **NOT PROVEN** |
+| Associated channel is present in successful `CONNECT_IND` | **PROVEN** |
+| RSSI change alone proves BSSID change | **UNKNOWN** |
+| Weak RSSI is structurally required for Beacon Recovery | **UNKNOWN; identified Recovery logic does not require it** |
+| Poor AP selection is required for C2 recurrence | **UNKNOWN; C2 provides an AP-independent recurrence mechanism** |
+| C1a is a host-side control-validity defect | **STRONGLY SUPPORTED** |
+| C1b is a host-side measurement-validity defect | **STRONGLY SUPPORTED** |
+| C2 stale-state recurrence exists | **PROVEN** |
+| AP behavior caused the first field Recovery trigger | **UNKNOWN** |
+| D3 power-save errors directly trigger Recovery | **UNKNOWN; no direct edge established** |
+| AP/RF behavior can affect normal WLAN energy cost | **STRONGLY SUPPORTED** |
+| Quantitative AP-selection contribution to battery drain | **UNKNOWN** |
+| Minimal `prevent_roaming` experiment is technically feasible | **PROVEN** |
+| Such a patch would improve battery life | **UNKNOWN** |
+| Patch C-C intentionally changes AP selection | **UNKNOWN as a hypothetical interaction; not part of its design** |
+| Patch C-C has passed static pre-build qualification | **PROVEN as project qualification status** |
+| Patch C-C runtime behavior is validated | **UNKNOWN; hardware qualification pending** |
 
 ---
 
-# 27. Remaining Open Questions
+# 40. Remaining Questions
 
-The main unresolved AP-selection questions are now:
+The main unresolved AP-selection questions are:
 
 1. What exact criteria does the WF200 use during wildcard AP selection?
+
 2. Does the WF200 internally prefer a previously associated AP?
+
 3. What thresholds and hysteresis would control autonomous roaming if
    `prevent_roaming = 0`?
-4. Do large observed RSSI changes on real devices correspond to actual BSSID
-   changes?
-5. How frequently does weak-AP retention occur in real multi-AP or mesh
-   environments?
-6. What is the quantitative electrical cost of operating at skip 10 versus
-   skip 15 or skip 20?
-7. How much do retransmissions and reconnects contribute under poor RF
-   conditions?
-8. Does internal AP-selection behavior differ between the protected WF200
-   images used by 2.1.3, 2.1.8 and 2.2.4?
-9. Would permitting autonomous roaming materially change long-term battery
-   consumption?
-10. Do RF conditions affect the WF200 beacon statistics involved in
-    `real_beacon_skip`, even though weak RSSI is not required for recovery?
 
-The last question is particularly important.
+4. How often does weak-but-functional AP retention occur in real mesh or
+   multi-AP networks?
 
-The good-RSSI result shows that:
+5. Do observed large RSSI changes correspond to actual BSSID changes?
+
+6. How much additional energy is consumed at skip 10 versus skip 15 or skip 20?
+
+7. How much do retransmissions contribute under poor RF conditions?
+
+8. How much energy is consumed by scan and reconnect events?
+
+9. Did the protected WF200 changes between 2.1.3, 2.1.8 and 2.2.4 alter AP
+   ranking or reconnect behavior?
+
+10. Can AP or RF conditions contribute to the first qualifying Beacon Recovery
+    measurement?
+
+11. Do D3 power-save events affect the received-beacon counter in a way relevant
+    to C1b?
+
+12. Would permitting autonomous roaming measurably improve long-term battery
+    consumption?
+
+13. Would permitting roaming introduce new stability or availability problems?
+
+14. How often would autonomous roaming actually occur in a representative
+    multi-AP installation?
+
+The most important distinction is:
 
 ```text
-weak RSSI
+AP/RF influence on the first trigger
 ```
 
-is not necessary for recovery.
+remains open.
 
-It does not prove that:
+But:
 
 ```text
-RF conditions
+AP/RF conditions required for persistent C2 recurrence
 ```
 
-have no influence on the underlying beacon statistics.
+are not needed by the identified host control flow.
 
 ---
 
-# 28. Current Research Priority
+# 41. Current Research Priority
 
-For the main battery-drain investigation, AP-selection modification is
-currently secondary.
+AP-selection modification is currently secondary.
 
-The higher-priority comparison is:
+The primary experimental paths are now separated.
 
-```text
-stock 2.2.4
-```
-
-against controlled experimental variants:
+## Periodic mDNS
 
 ```text
-Patch A
-beacon-recovery suppression
-
 Patch B
-periodic mDNS restart suppression
-
-Patch A+B
-both targeted recurring mechanisms suppressed
+        |
+        v
+suppress targeted recurring mDNS restart
+        |
+        v
+measure long-term battery contribution
 ```
 
-This provides cleaner causal isolation than changing roaming behavior.
+## Beacon Recovery
 
-AP-selection research remains useful for:
+```text
+Patch C-C
+        |
+        v
+correct C1a / C1b / C2 semantics
+        |
+        v
+independent binary / GBL verification
+        |
+        v
+controlled hardware qualification
+        |
+        v
+long-term battery comparison
+```
 
-- understanding WLAN behavior
-- explaining RSSI variation
-- evaluating weak-signal energy costs
-- investigating mesh behavior
-- interpreting reconnect events
+## AP Selection
 
-but should currently remain separate from the primary patch validation.
+```text
+diagnostic BSSID observation
+        |
+        v
+controlled weak-AP experiment
+        |
+        v
+reconnect experiment
+        |
+        v
+optional roaming intervention
+```
+
+This order avoids introducing unnecessary variables into the main battery
+experiment.
 
 ---
 
-# 29. Current Model
+# 42. Current Model
 
-The current WLAN model is:
+The current AP-selection model is:
 
 ```text
-                    scan
-                     |
-                     v
-             matching SSID(s)
-                     |
-                     v
-             host CONNECT request
-                     |
-            BSSID = wildcard
-            Channel = 0
-            prevent_roaming = 1
-                     |
-                     v
-                WF200
-                     |
-                     v
-             selects actual AP
-                     |
-                     v
-                association
-                     |
-                     v
-               CONNECT_IND
-              BSSID + channel
-                     |
-                     v
-             connected state
-                     |
-          +----------+----------+
-          |                     |
-          v                     v
-     RSSI changes        connection loss
-          |                     |
-          v                     v
- desired_beacon_skip          scan
-          |                     |
-          v                     v
- normal WLAN             wildcard CONNECT
- power saving                  |
+                     scan
+                      |
+                      v
+              matching SSID(s)
+                      |
+                      v
+              host CONNECT request
+                      |
+             BSSID = wildcard
+             Channel = 0
+             prevent_roaming = 1
+                      |
+                      v
+                    WF200
+                      |
+                      v
+              selects actual AP
+                      |
+                      v
+                 association
+                      |
+                      v
+                 CONNECT_IND
+                BSSID + channel
+                      |
+                      v
+               connected state
+                      |
+            +---------+---------+
+            |                   |
+            v                   v
+       RSSI changes       connection loss
+            |                   |
+            v                   v
+ desired_beacon_skip           scan
+            |                   |
+            v                   v
+ normal requested       wildcard CONNECT
+ WLAN power saving             |
                                 v
-                        AP selected again
+                         AP selected again
 ```
 
-A separate 2.2.4 mechanism is:
+A separate 2.2.4 host mechanism is:
 
 ```text
 WF200 beacon statistics
         |
         v
-beacon_rx_count
+received-beacon counter
+        |
+        v
+host measurement
+        |
+        +---- C1a
+        |
+        +---- C1b
         |
         v
 real_beacon_skip
         |
         v
-recovery predicate
+Recovery predicate
         |
         v
 temporary state 1
+        |
+        v
+C2 can sustain recurrence
 ```
 
-The two mechanisms share the WLAN environment but must not be treated as the
-same control path.
+The two mechanisms share the WLAN environment.
+
+They must not be treated as the same control path.
 
 ---
 
-# 30. Current Conclusion
+# 43. Current Conclusion
 
-The Shelly TRV host application does not explicitly select the strongest access
-point during normal connection establishment.
+The Shelly TRV host application does not explicitly select one particular
+strongest AP during normal connection establishment.
 
-Instead it uses:
+Instead, the examined connection path uses:
 
 ```text
 BSSID   = FF:FF:FF:FF:FF:FF
@@ -1580,103 +2403,189 @@ Channel = 0
 
 and delegates concrete AP selection to the WLAN/WF200 subsystem.
 
-The stock firmware also sets:
+The host also sets:
 
 ```text
 prevent_roaming = 1
 ```
 
-which prevents autonomous firmware-controlled roaming after association.
+which prevents autonomous WLAN-firmware roaming after association.
 
 No separate host-side mechanism was identified that periodically moves an
-established connection to a stronger AP.
+established connection to a stronger AP based only on RSSI.
 
-Consequently, retention of a weak but functional AP is technically possible.
+A weak but still functional AP can therefore potentially remain associated.
 
-Weak RSSI then affects normal WLAN power saving by reducing
-`desired_beacon_skip`.
-
-However, later runtime testing established that the recurring 2.2.4
-beacon-recovery loop also occurs with good RSSI and:
+Weak RSSI then affects normal WLAN power saving through:
 
 ```text
-desired_beacon_skip = 20
+RSSI
+ |
+ v
+desired_beacon_skip
 ```
 
-Therefore:
+and may increase normal radio-side work through lower skip values,
+retransmissions, or connection instability.
 
-> Weak RSSI and poor AP selection are not necessary conditions for the known
-> recurring beacon-recovery behavior.
+However, the Beacon Recovery investigation now provides a much clearer
+separation between AP behavior and the recurring 2.2.4 Recovery problem.
 
-This substantially reduces the likelihood that AP retention alone explains the
-2.2.4 recovery loop.
+C1a concerns signed interpretation of the host control value.
 
-AP selection can still affect WLAN energy consumption through normal radio
-conditions, beacon-listening frequency, retransmissions and reconnects.
+C1b concerns validity of the measurement interval.
 
-Its quantitative contribution to the historical battery-drain problem remains
-unresolved.
+C2 concerns reuse of historical Recovery evidence after the counter baseline
+has been cleared.
 
-For the current research phase, direct comparison of stock firmware with the
-isolated and combined recurring-activity patches provides a cleaner experiment
-than modifying roaming behavior.
+None of these defects requires persistent poor AP selection.
+
+Most importantly:
+
+> Once a qualifying Recovery has occurred, the identified C2 control flow can
+> sustain recurring Recovery without requiring continued weak RSSI, a new AP
+> problem, a new mDNS event, or a fresh qualifying RF anomaly on every cycle.
+
+AP behavior therefore remains relevant to:
+
+```text
+normal WLAN energy efficiency
+possible first-trigger conditions
+connection stability
+retransmissions
+reconnect behavior
+```
+
+but it is no longer a leading explanation for the self-sustaining Recovery
+loop.
+
+The actual contribution of AP selection to the historical battery drain
+remains:
+
+**UNKNOWN**
+
+Changing `prevent_roaming` is technically feasible, but it would introduce
+another experimental variable without correcting C1a, C1b or C2.
+
+The preferred current strategy is therefore:
+
+```text
+do not modify roaming yet
+        |
+        v
+observe actual BSSID first
+        |
+        v
+complete Patch C-C hardware qualification
+        |
+        v
+continue Patch-B battery comparison
+        |
+        v
+investigate AP behavior separately if evidence justifies it
+```
+
+This preserves causal interpretability and avoids using an AP-selection change
+as a workaround for a host-side Beacon Recovery defect.
 
 ---
 
 # Related Documents
 
-- [`Firmware Comparison`](firmware-comparison.md)
-- [`Power Management and Sleep`](power-management-and-sleep.md)
-- [`Beacon RX Counter`](beacon-rx-counter.md)
-- [`Real Beacon Skip`](real-beacon-skip.md)
-- [`Recovery Mechanism`](recovery-mechanism.md)
-- [`Periodic mDNS Restart`](mdns-periodic-restart.md)
-- [`Experimental Beacon-Recovery Patch`](../patch/README.md)
-- [`Battery Testing`](../testing/battery-testing.md)
+Firmware chronology:
+
+[`firmware-comparison.md`](firmware-comparison.md)
+
+Power-management behavior:
+
+[`power-management-and-sleep.md`](power-management-and-sleep.md)
+
+Beacon counter:
+
+[`beacon-rx-counter.md`](beacon-rx-counter.md)
+
+`real_beacon_skip`:
+
+[`real-beacon-skip.md`](real-beacon-skip.md)
+
+Beacon Recovery:
+
+[`recovery-mechanism.md`](recovery-mechanism.md)
+
+Periodic mDNS:
+
+[`mdns-periodic-restart.md`](mdns-periodic-restart.md)
+
+Experimental patches:
+
+[`../patch/README.md`](../patch/README.md)
+
+Battery testing:
+
+[`../testing/battery-testing.md`](../testing/battery-testing.md)
 
 ---
 
 # Research Methodology
 
 This investigation is based on static reverse engineering of locally obtained
-Shelly TRV Gen1 firmware images together with runtime observations from
-personally owned devices.
+Shelly TRV Gen1 firmware together with runtime observations from personally
+owned devices.
 
 The analysis includes:
 
 - WLAN scan handling
 - CONNECT parameter construction
-- disconnect and reconnect handling
+- BSSID and channel handling
+- disconnect and reconnect behavior
 - RSSI and RCPI processing
 - power-management interaction
-- successful `CONNECT_IND` handling
+- successful `CONNECT_IND` processing
 - firmware-version comparison
-- runtime observation of RSSI and beacon recovery
+- protected-WLAN-version comparison
+- Beacon Recovery control-flow analysis
+- runtime WLAN observations
 
-Publicly available Silicon Labs WF200/fullMAC information was used where
-necessary to interpret host-visible WLAN interface parameters.
+The examined host firmware versions are:
 
-The internal protected WF200 AP-ranking and roaming implementation is not
-reproduced and cannot be completely determined from the host application.
+```text
+2.1.0
+2.1.3
+2.1.8
+2.2.4
+```
 
-No firmware images, complete proprietary functions or complete disassemblies
-are published in this document.
+The analysis deliberately distinguishes:
 
-The classifications:
+```text
+host-visible behavior
+```
+
+from:
+
+```text
+protected WF200 internal behavior
+```
+
+The exact protected WF200 AP-ranking algorithm has not been reconstructed and
+must therefore remain unknown unless established by separate evidence.
+
+Small instruction-level facts, control-flow relationships and interface
+parameters are documented where necessary for reproducibility.
+
+Complete proprietary firmware functions, firmware images and large raw
+disassemblies are not reproduced.
+
+The project uses:
 
 ```text
 PROVEN
-RUNTIME CONFIRMED
-STRONG INFERENCE
-PLAUSIBLE
-NOT OBSERVED
-NOT SUPPORTED
-NOT PROVEN
-UNRESOLVED
+STRONGLY SUPPORTED
+INFERENCE
+UNKNOWN
 ```
 
-are deliberately used to distinguish direct static evidence, runtime evidence
-and interpretation.
+to distinguish direct evidence from interpretation and unresolved behavior.
 
 ---
 
@@ -1690,7 +2599,7 @@ Silicon Labs.
 All product names and trademarks belong to their respective owners.
 
 The findings documented here describe observed and reverse-engineered behavior
-of the tested firmware versions.
+of the investigated firmware versions.
 
-No conclusions about the intentions of the original developers are inferred
-from these technical findings.
+No conclusion about the intentions of the original developers is made unless
+supported by independent technical evidence.

@@ -10,7 +10,7 @@ the analyzed Shelly TRV Gen1 firmware versions:
 - 2.1.8
 - 2.2.4
 
-The main purpose is to distinguish between three different layers:
+The primary purpose is to distinguish between three different layers:
 
 1. application-level WLAN power-management state
 2. host-driver wake/sleep and MCU sleep-resource state
@@ -24,35 +24,73 @@ For example:
 
 ```text
 application state = 3
+desired_beacon_skip = 20
 ```
 
 does not by itself prove:
 
 ```text
-WF200 successfully entered the requested power-save mode
+WF200 successfully entered and remained
+in the requested power-save configuration
 ```
 
 and it also does not necessarily prove:
 
 ```text
-the host MCU is free to enter its expected deepest sleep state
+the host MCU is currently free to enter
+its expected deepest sleep state
 ```
 
-The document also separates:
+This document also covers:
 
-- normal power-saving behavior
-- externally requested temporary overrides
+- normal RSSI-dependent power saving
+- temporary power-management overrides
+- WUP and host sleep-resource handling
 - inherited conditional sleep-failure paths
-- the 2.2.4 beacon-recovery mechanism
-- periodic mDNS activity
-- experimentally patched behavior
+- power-management evolution across firmware versions
+- the 2.2.4 Beacon Recovery mechanism
+- interaction between PM state and beacon-measurement validity
+- the C1a, C1b, and C2 Beacon Recovery defects
+- periodic mDNS as a separate recurring mechanism
+- experimental Patch A and Patch B
+- the current Patch C-C corrective design
+- remaining runtime and energy-consumption unknowns
 
-No firmware images, complete proprietary functions or complete disassemblies
-are reproduced here.
+No firmware images, complete proprietary functions, or large raw
+disassemblies are reproduced here.
 
 ---
 
-# 1. Power-Management Layers
+# 1. Evidence Classification
+
+This project uses the following evidence levels.
+
+## PROVEN
+
+Directly established from native firmware instructions, deterministic binary
+comparison, validated control flow, or sufficiently direct runtime evidence.
+
+## STRONGLY SUPPORTED
+
+Multiple independent findings support the conclusion, but some implementation
+detail, runtime dependency, or original design intent remains unresolved.
+
+## INFERENCE
+
+A technically plausible interpretation consistent with the available evidence,
+but not directly established.
+
+## UNKNOWN
+
+The available evidence is insufficient to determine the behavior, runtime
+frequency, quantitative effect, or original developer intent.
+
+Where useful, runtime observations are explicitly described as runtime
+evidence, but they do not replace these evidence classifications.
+
+---
+
+# 2. Power-Management Architecture
 
 A simplified model is:
 
@@ -77,29 +115,42 @@ state 3
 desired_beacon_skip = 20
 ```
 
-while the exact internal WF200 behavior remains dependent on:
+while the exact internal WF200 behavior still depends on:
 
 - successful host-to-WF200 communication
 - acceptance of the requested power-save configuration
 - internal WF200 behavior
-- successful completion of the device-sleep sequence
+- completion of the device-sleep sequence
+- subsequent radio-internal events
+- later PM reconfiguration
 
 The application does not continuously verify every aspect of the resulting
 internal radio state.
 
+This distinction is particularly important when interpreting debug logs.
+
+A log such as:
+
+```text
+Enter powersave state 3 (skip 20)
+```
+
+establishes the requested host-side transition.
+
+It is not a direct electrical measurement of the WF200 or MCU state.
+
 ---
 
-# 2. Normal RSSI-Dependent Beacon Skip
+# 3. Normal RSSI-Dependent Beacon Skip
 
-The analyzed firmware versions use the same normal desired beacon-skip mapping:
+The analyzed firmware versions use the following normal desired beacon-skip
+mapping:
 
 | RSSI | Desired beacon skip |
 |---|---:|
 | >= -69 dBm | 20 |
 | -79 to -70 dBm | 15 |
 | < -79 dBm | 10 |
-
-This value is used by the normal connected power-management path.
 
 Conceptually:
 
@@ -116,37 +167,52 @@ state 3
 WF200 power-save request
 ```
 
-The value is a requested configuration.
+This value represents the host-requested power-save configuration.
 
-It must not automatically be interpreted as proof of the exact internal WF200
-beacon-listening behavior.
+It must not automatically be interpreted as the exact physical number of
+beacons between radio wake events.
 
-This distinction became particularly important after runtime testing showed
-that firmware 2.2.4 can enter beacon recovery even with:
+This distinction becomes especially important in firmware 2.2.4 because the
+firmware also maintains a separate counter-derived value:
 
 ```text
-good RSSI
-desired_beacon_skip = 20
+real_beacon_skip
 ```
+
+The two values serve different purposes.
+
+```text
+desired_beacon_skip
+```
+
+is the requested configuration.
+
+```text
+real_beacon_skip
+```
+
+is a host-derived diagnostic/control value calculated from WF200 statistics.
+
+They must not be treated as equivalent.
 
 ---
 
-# 3. Application Power States
+# 4. Application Power States
 
 The firmware uses several application-level WLAN power-management states.
 
 The currently understood states are:
 
-| State | Purpose |
+| State | Current interpretation |
 |---|---|
-| 1 | Active / temporary active WLAN override |
-| 2 | Special temporary power-management mode |
-| 3 | Normal RSSI-dependent power-save state |
-| 4 | Restore saved or deferred power state |
-| 5 | Temporary Fast Power Save override with skip 10 |
+| 1 | Active / temporary Active WLAN |
+| 2 | Special temporary PM mode; less completely characterized |
+| 3 | Normal RSSI-dependent Fast Power Save |
+| 4 | Restore saved or deferred PM state |
+| 5 | Temporary Fast Power Save override with beacon skip 10 |
 
 Not every state exists or is used identically in every analyzed firmware
-version.
+generation.
 
 The most important states for the current battery investigation are:
 
@@ -156,98 +222,14 @@ state 3
 state 5
 ```
 
-State 4 is important for restoration behavior.
-
-State 2 remains less well characterized and is not currently considered a
-primary battery-drain candidate.
+State 4 is important because several temporary mechanisms use it as part of
+restoration.
 
 ---
 
-# 4. State 1 — Active / Temporary Active WLAN
+# 5. State 3 — Normal Connected Power Saving
 
-State 1 represents a more active WLAN condition.
-
-The analyzed path requests WLAN power mode:
-
-```text
-0
-```
-
-which corresponds to:
-
-```text
-Active / Always-On
-```
-
-in the relevant WF200/fullMAC interface.
-
-Conceptually:
-
-```text
-request state 1
-        |
-        v
-wake WLAN device
-        |
-        v
-request Active / Always-On
-        |
-        v
-WUP remains active
-        |
-        v
-WLAN-owned MCU sleep restriction remains active
-```
-
-State 1 does not perform the normal final device-sleep transition used by the
-normal state-3 path.
-
-Therefore prolonged or repeatedly entered state 1 can be energy relevant.
-
-This does not mean the host CPU necessarily executes continuously.
-
-The important difference is that deeper host sleep states are restricted while
-the corresponding WLAN-owned sleep resource remains held.
-
----
-
-# 5. State 1 Before Firmware 2.2.4
-
-State 1 did not originate with the 2.2.4 beacon-recovery mechanism.
-
-Earlier firmware already contains externally triggered active-override paths.
-
-Firmware 2.1.3 includes a named external override associated with:
-
-```text
-psovrd
-```
-
-The override temporarily requests the more active WLAN state and later restores
-the saved or deferred application state.
-
-No equivalent autonomous approximately once-per-minute state-1 recovery loop
-was identified in the focused 2.1.0 -> 2.1.3 comparison.
-
-This distinction is important:
-
-```text
-state 1 exists
-```
-
-does not mean:
-
-```text
-automatic recurring beacon recovery exists
-```
-
-The latter is a separate mechanism identified in firmware 2.2.4.
-
----
-
-# 6. State 3 — Normal Connected Power Saving
-
-State 3 is the normal RSSI-dependent connected power-save state.
+State 3 is the normal connected power-management state.
 
 Conceptually:
 
@@ -270,7 +252,7 @@ final device-sleep operation
 WUP/resource release
 ```
 
-Typical requested values are:
+Typical requested configurations are:
 
 ```text
 strong RSSI
@@ -283,7 +265,7 @@ weak RSSI
 skip 10
 ```
 
-On successful completion of the normal path:
+When the normal path completes successfully:
 
 ```text
 power-save request
@@ -301,22 +283,117 @@ WLAN-owned MCU sleep contribution released
 deeper host sleep becomes possible
 ```
 
-Other firmware components can independently hold sleep resources.
+Other firmware components may independently hold their own sleep resources.
 
-Therefore release of the WLAN-owned contribution does not guarantee that the
-MCU immediately enters a particular energy mode.
+Therefore release of the WLAN-owned contribution does not prove that the MCU
+immediately enters a specific energy mode.
+
+### Classification
+
+State 3 as normal connected PM state:
+
+**PROVEN**
+
+RSSI-dependent desired-skip mapping:
+
+**PROVEN**
+
+Exact internal WF200 behavior after every successful request:
+
+**UNKNOWN**
 
 ---
 
-# 7. State 4 — Restore Saved / Deferred State
+# 6. State 1 — Active / Temporary Active WLAN
 
-State 4 is associated with restoration of a previously saved or deferred
-application power-management state.
+State 1 represents a more active WLAN configuration.
+
+The identified path requests the relevant WF200 mode corresponding to:
+
+```text
+Active / Always-On
+```
 
 Conceptually:
 
 ```text
-temporary override
+request state 1
+        |
+        v
+wake WLAN device
+        |
+        v
+request Active / Always-On
+        |
+        v
+WUP remains active
+        |
+        v
+WLAN-owned deeper-sleep restriction remains active
+```
+
+State 1 does not perform the normal final device-sleep transition used by the
+normal state-3 path.
+
+Therefore prolonged or repeatedly entered state 1 can be energy relevant.
+
+This does **not** mean that the host CPU necessarily executes continuously
+during the entire state-1 interval.
+
+The more precise interpretation is:
+
+> The WLAN-owned restriction prevents the host from using the deeper energy
+> modes that would otherwise become available after normal WLAN sleep
+> completion.
+
+For the known 2.2.4 Beacon Recovery path, EM2 and EM3 are restricted during
+the temporary active interval.
+
+EM1 remains available.
+
+---
+
+# 7. State 1 Predates Beacon Recovery
+
+State 1 did not originate with the 2.2.4 Beacon Recovery mechanism.
+
+Earlier firmware already contains externally triggered active-override
+behavior.
+
+Firmware 2.1.3 contains an externally accessible override associated with:
+
+```text
+psovrd
+```
+
+Therefore:
+
+```text
+state 1 exists
+```
+
+does not imply:
+
+```text
+automatic Beacon Recovery exists
+```
+
+The approximately minute-spaced automatic state-1 recovery loop investigated
+in this project is a separate mechanism identified in firmware 2.2.4.
+
+This distinction is important when comparing firmware generations.
+
+---
+
+# 8. State 4 — Restoration
+
+State 4 is associated with restoration of a saved or deferred application PM
+state.
+
+Conceptually:
+
+```text
+temporary PM state
         |
         v
 saved previous state
@@ -325,23 +402,26 @@ saved previous state
 state 4
         |
         v
-restore previous / deferred state
+restore previous / deferred PM state
 ```
 
-Its importance becomes especially visible in the firmware 2.1.8
-post-association sequence.
+State 4 should therefore not be interpreted as one fixed radio power mode.
 
-State 4 must not be interpreted as a separate fixed radio power mode.
+Its main role is application-level restoration.
 
-Its role is primarily restoration of application power-management state.
+It becomes particularly relevant in:
+
+- temporary overrides
+- post-association handling
+- Beacon Recovery restoration
 
 ---
 
-# 8. State 5 — Temporary Fast Power Save Override
+# 9. State 5 — Temporary Fast Power Save Override
 
 State 5 first appears in the analyzed firmware set in version 2.1.3.
 
-Focused reverse engineering identified external interfaces associated with:
+Identified external interfaces include:
 
 ```text
 HTTP:
@@ -351,25 +431,26 @@ Cloud:
 psovrd2
 ```
 
-State 5 requests:
+State 5 requests approximately:
 
 ```text
 Fast Power Save
 beacon skip = 10
 ```
 
-and initializes a restoration countdown of:
+and initializes a shared restoration countdown:
 
 ```text
-180
+H = 180
 ```
 
 The countdown is serviced by firmware seconds maintenance.
 
-Under normal scheduler operation this corresponds to approximately:
+Under normal scheduler servicing this corresponds to approximately:
 
 ```text
-3 minutes
+180 serviced seconds
+≈ 3 minutes
 ```
 
 A typical sequence is:
@@ -385,9 +466,9 @@ state 5
 Fast Power Save
 skip 10
         |
-        | approximately 180 serviced seconds
+        | H counts down
         v
-restore saved / deferred state
+restore saved / deferred PM state
         |
         v
 typically state 3
@@ -395,17 +476,17 @@ typically state 3
 
 ---
 
-# 9. State 5 Does Not Intentionally Hold the Host Awake
+# 10. State 5 Does Not Intentionally Hold the MCU Awake
 
-State 5 should not be described as:
+State 5 must not be described as:
 
 ```text
-MCU awake for three minutes
+MCU awake for 180 seconds
 ```
 
 The normal state-5 path still performs the final device-sleep operation.
 
-On successful completion:
+Conceptually:
 
 ```text
 state 5 request
@@ -421,61 +502,73 @@ device sleep enabled
 WUP cleared
         |
         v
-WLAN-owned MCU sleep contribution released
+WLAN-owned host sleep contribution released
 ```
 
-Therefore state 5 primarily changes the WLAN beacon-listening configuration.
+Therefore state 5 primarily changes the WLAN power-save policy.
 
-For a device that would normally request:
+For example:
 
 ```text
+normal:
 skip 20
-```
 
-state 5 instead requests:
-
-```text
+state 5:
 skip 10
 ```
 
 This creates more nominal beacon-listening opportunities.
 
-It does not by itself establish a particular electrical energy cost.
+The electrical cost of that difference has not been directly measured.
+
+### Classification
+
+State 5 requests Fast Power Save / skip 10:
+
+**PROVEN**
+
+State 5 intentionally holds the host fully awake for 180 seconds:
+
+**FALSE**
+
+Quantitative energy effect:
+
+**UNKNOWN**
 
 ---
 
-# 10. State 5 Can Be Externally Prolonged
+# 11. State 5 Can Be Externally Prolonged
 
-The external `psovrd2` handlers initialize the restoration countdown before
-dispatching the state-5 request.
+The external `psovrd2` paths set the countdown before dispatching the state-5
+request.
 
-This matters if state 5 is already active.
+This matters if the override is already active.
 
 For example:
 
 ```text
 state 5
-countdown = 60
+H = 60
 
-        |
-        | new external psovrd2
-        v
+   |
+   | new psovrd2 request
+   v
 
-countdown = 180
+H = 180
 
-        |
-        v
+   |
+   v
 
 duplicate state request may be rejected
 but countdown has already been refreshed
 ```
 
-Therefore repeated external requests can prolong state 5.
+Repeated external requests can therefore prolong the override.
 
-No autonomous periodic firmware mechanism has been identified that repeatedly
-generates these `psovrd2` requests during ordinary idle operation.
+No autonomous normal-idle firmware mechanism has been identified that
+continuously generates `psovrd2` requests.
 
-State 5 is therefore currently classified as:
+State 5 is currently best described as:
 
 ```text
 externally triggered
@@ -491,7 +584,7 @@ autonomous recurring idle loop
 
 ---
 
-# 11. WF200 Power-Save Command `0x52`
+# 12. WF200 Power-Save Command `0x52`
 
 The host uses WF200 command:
 
@@ -501,36 +594,35 @@ The host uses WF200 command:
 
 for WLAN power-management configuration.
 
-Across the analyzed firmware versions, the exact payload representation
-changes.
-
-The general role remains:
+Conceptually:
 
 ```text
-host
- |
- v
+host PM state
+        |
+        v
 command 0x52
- |
- v
-requested WF200 power-save configuration
+        |
+        v
+requested WF200 PM configuration
 ```
 
-Older analyzed versions use the earlier payload representation for the normal
-power-save mode and beacon-skip configuration.
+The exact payload representation changes between firmware generations.
 
-Firmware 2.2.4 uses an expanded representation and additional surrounding
-locking, retry and error-handling logic.
+Firmware 2.2.4 contains expanded surrounding:
 
-The existence of a host request does not itself prove that the protected WF200
-subsystem remains indefinitely in exactly the requested internal state.
+- locking
+- retry behavior
+- error handling
+- PM state management
+
+The existence of a successful host-side request does not prove that the
+protected WF200 remains indefinitely in exactly that internal configuration.
 
 ---
 
-# 12. Requested State vs. Confirmed State
+# 13. Requested State vs. Actual Lower-Level State
 
-A central finding is that application bookkeeping and lower-level hardware
-state are not identical.
+Application bookkeeping and lower-level WLAN state are distinct.
 
 Conceptually:
 
@@ -538,7 +630,7 @@ Conceptually:
 application requests state 3
         |
         v
-application bookkeeping updated
+application bookkeeping
         |
         v
 wake WF200
@@ -547,13 +639,13 @@ wake WF200
 command 0x52
         |
         v
-final device-sleep operation
+device-sleep sequence
 ```
 
-Not every lower-level failure causes the application bookkeeping to be fully
-rolled back.
+Not every lower-level failure necessarily rolls application bookkeeping back
+to its previous value.
 
-The firmware can therefore conceptually reach a situation such as:
+A state such as:
 
 ```text
 application:
@@ -562,31 +654,23 @@ state 3
 requested:
 skip 20
 
-actual lower-level state:
-not completely verified by application bookkeeping alone
+lower-level radio / transport:
+not completely established from application state alone
 ```
 
-This is important when interpreting debug logs.
+is therefore conceptually possible.
 
-A log reporting:
-
-```text
-Enter powersave state 3 (skip 20)
-```
-
-establishes the application request.
-
-It should not automatically be treated as a direct electrical measurement or
-complete proof of the final internal WF200 state.
+This is why debug logs must be interpreted as evidence of requested host-side
+behavior rather than direct measurement of the final electrical state.
 
 ---
 
-# 13. Command `0x52` Failure vs. Final-Sleep Failure
+# 14. Command `0x52` Failure vs. Device-Sleep Failure
 
 Two failure classes must be distinguished.
 
-A failed power-save command does not automatically imply that WUP or the
-WLAN-owned MCU sleep resource remains held.
+A failed command `0x52` does not automatically imply retained WUP or a
+persistent MCU sleep restriction.
 
 For example:
 
@@ -600,7 +684,7 @@ final device-sleep operation succeeds
 WUP cleared
         |
         v
-WLAN-owned sleep contribution released
+WLAN-owned host sleep contribution released
 ```
 
 Therefore:
@@ -612,19 +696,19 @@ command 0x52 failure
 does not automatically mean:
 
 ```text
-persistent MCU sleep blocker
+persistent host sleep blocker
 ```
 
-The more important resource-retention case is failure of the later
-device-sleep operation itself.
+The more important retained-resource case occurs when the later device-sleep
+operation itself fails before normal cleanup.
 
 ---
 
-# 14. WUP and Host Sleep Resources
+# 15. WUP and Host Sleep Resources
 
-WUP is part of the host-to-WF200 wake/sleep coordination.
+WUP participates in host-to-WF200 wake/sleep coordination.
 
-During an explicit WLAN wake sequence:
+During explicit WLAN wake:
 
 ```text
 acquire WLAN sleep resource
@@ -636,7 +720,7 @@ assert WUP
 communicate with WF200
 ```
 
-When the operation completes and device sleep is successfully enabled:
+When the operation completes successfully:
 
 ```text
 device sleep enabled
@@ -645,72 +729,18 @@ device sleep enabled
 WUP cleared
         |
         v
-WLAN-owned MCU sleep contribution released
+WLAN-owned host sleep contribution released
 ```
 
-This lifecycle matters because the WLAN subsystem contributes to host MCU
-sleep-resource accounting.
+This matters because the WLAN subsystem participates in host MCU sleep-resource
+accounting.
 
-While that contribution remains held, deeper MCU energy modes can be
-restricted.
+While the WLAN-owned restriction remains held, deeper host energy modes can be
+prevented.
 
 ---
 
-# 15. MCU Energy-Mode Restriction
-
-The WLAN subsystem can prevent the host MCU from entering deeper energy modes
-while WLAN-related work requires the host to remain available.
-
-Simplified:
-
-```text
-WLAN requires host availability
-        |
-        v
-WLAN-owned sleep block held
-        |
-        v
-deeper host sleep restricted
-```
-
-When normal cleanup succeeds:
-
-```text
-WF200 can sleep
-        |
-        v
-WUP cleared
-        |
-        v
-WLAN-owned contribution released
-        |
-        v
-deeper MCU sleep becomes possible
-```
-
-For the known 2.2.4 beacon-recovery path, the relevant practical effect is that
-EM2 and EM3 are restricted during the temporary recovery interval.
-
-EM1 remains available.
-
-Therefore:
-
-```text
-recovery
-```
-
-does not mean:
-
-```text
-CPU executes continuously for five seconds
-```
-
-It means that the deeper sleep states normally available to the host are
-temporarily unavailable because of the WLAN-owned restriction.
-
----
-
-# 16. Conditional Final-Sleep Failure Path
+# 16. Conditional Final-Sleep Failure
 
 A separate conditional failure path exists in the lower-level sleep handling.
 
@@ -723,10 +753,7 @@ WLAN wake
 WUP / WLAN sleep resource acquired
         |
         v
-application PM state recorded
-        |
-        v
-power-save request
+application PM operation
         |
         v
 final device-sleep operation
@@ -740,124 +767,111 @@ final device-sleep operation
         +---- control-register I/O failure
                 |
                 v
-           function returns error
+            error return
                 |
                 v
         normal release can be skipped
 ```
 
-This creates a possible mismatch:
+This can create a mismatch:
 
 ```text
-application state = 3
+application state = power-save state
 ```
 
 while:
 
 ```text
-WUP / WLAN-owned sleep contribution
+WUP / WLAN-owned host sleep contribution
 may remain active
 ```
 
 The existence of this control-flow path is established by static analysis.
 
-Its runtime frequency and duration have not been established.
+Its runtime frequency and duration are not established.
+
+### Classification
+
+Conditional retention path:
+
+**PROVEN**
+
+Occurrence during ordinary field operation:
+
+**UNKNOWN**
+
+Battery contribution:
+
+**UNKNOWN**
 
 ---
 
-# 17. The Final-Sleep Failure Path Is Inherited
+# 17. The WUP Retention Path Is Inherited
 
-Focused comparison showed that the core conditional final-sleep / WUP /
-sleep-resource retention path already exists in:
+Focused comparison shows that the fundamental conditional final-sleep /
+resource-retention path already exists in firmware 2.1.0.
 
-```text
-2.1.0
-```
+It remains present in later firmware generations.
 
-and remains present in:
+Therefore the existence of this path cannot by itself identify a later
+battery-regression boundary.
 
-```text
-2.1.3
-```
-
-Therefore the existence of this path was not introduced by the
-2.1.0 -> 2.1.3 transition.
-
-This is important when evaluating historical battery drain.
-
-The inherited path cannot by itself explain a version boundary unless some
-other change causes it to be:
+For it to explain a version-dependent regression, another change would need to
+cause it to be:
 
 - reached more frequently
 - retained for longer
 - recovered differently
 - combined with another mechanism
 
-None of those possibilities has yet been demonstrated at runtime.
+No such runtime relationship has yet been demonstrated.
+
+This is why WUP/EM2 remains a separate research track.
 
 ---
 
-# 18. Why the Inherited Failure Path Still Matters
+# 18. Why Blind WUP Cleanup Would Be Unsafe
 
-Although inherited, the failure path remains potentially energy relevant.
-
-If it occurs:
+A retained-resource path might superficially suggest:
 
 ```text
-final sleep operation fails
+device-sleep operation failed
         |
         v
-WUP/resource remains held
-        |
-        v
-deeper host sleep remains restricted
-        |
-        v
-persistent elevated idle consumption becomes possible
+force WUP low
+force sleep-resource release
 ```
 
-A persistent retained-resource condition could potentially be more significant
-than a short network packet burst.
+Such a modification is not justified by the current evidence.
 
-However, static analysis does not establish:
+If the WF200 transport still legitimately requires host availability, forced
+release could cause:
 
-- whether the failure occurs on real devices during ordinary operation
-- how frequently it occurs
-- how long the resource remains retained
-- whether later WLAN activity repairs the condition
-- the resulting electrical current
+- missed WLAN interrupts
+- transport desynchronization
+- failed WLAN communication
+- driver-state corruption
+- unstable PM state
+- connectivity loss
 
-It must therefore remain classified as a plausible conditional mechanism, not
-as an established battery-drain cause.
+A safe correction would require establishing the complete transport and
+hardware state after the failure.
 
----
+An existing vendor cleanup or retry path would be preferable to inventing an
+unverified forced-release sequence.
 
-# 19. Transport Automatic Sleep Handling
-
-The lower-level transport contains additional automatic sleep handling.
-
-This behavior depends on internal driver state.
-
-Explicit wake handling changes a driver sleep-enable condition.
-
-If an operation fails before the expected state is restored, automatic cleanup
-cannot simply be assumed to repair the condition immediately.
-
-This contributes to the plausibility of the retained-resource path.
-
-However, the actual runtime duration of such a condition remains unresolved.
+No such WUP/EM2 patch is part of the current Patch C design.
 
 ---
 
-# 20. Initialization EM2 Asymmetry
+# 19. Initialization Sleep-Resource Asymmetry
 
-Another inherited resource-management asymmetry exists during WLAN driver
-initialization.
+A related resource-management asymmetry exists during WLAN initialization.
 
 Conceptually:
 
 ```text
-block deeper MCU sleep
+block deeper host sleep
         |
         v
 initialize WLAN transport
@@ -874,24 +888,17 @@ initialize WLAN transport
         not guaranteed
 ```
 
-This behavior exists in both:
+The relevant behavior exists in older firmware as well.
 
-```text
-2.1.0
-2.1.3
-```
+Therefore it does not independently identify the later battery-regression
+boundary.
 
-It therefore does not by itself explain a 2.1.0 -> 2.1.3 battery-consumption
-difference.
-
-Later cleanup or a complete reset may restore a balanced state.
-
-Whether an in-place driver reinitialization can leave an earlier contribution
+Whether an in-place reinitialization can leave an earlier resource contribution
 retained remains unresolved.
 
 ---
 
-# 21. Wake-ACK Wait Change
+# 20. Wake-ACK Timing Change
 
 The WF200 wake-acknowledgement wait changes between firmware 2.1.0 and 2.1.3.
 
@@ -906,30 +913,68 @@ maximum requested wait = 5 ticks
 + timeout logging
 ```
 
-The wait terminates early if the acknowledgement arrives before the maximum.
+The wait terminates early if acknowledgement arrives before the maximum.
 
 Therefore this does not imply that firmware 2.1.3 always spends two additional
 ticks awake on every WLAN wake.
 
 Possible effects include:
 
-- longer wait during slow or failed wake
+- longer wait during slow wake
 - greater tolerance for delayed acknowledgement
 - fewer premature wake failures
-- additional timeout logging
+- different timeout behavior
 
-The net energy effect remains unresolved.
+The net energy effect remains unknown.
 
 ---
 
-# 22. Firmware 2.1.0 -> 2.1.3
+# 21. Firmware Evolution
 
-The focused comparison separates inherited behavior from newly introduced or
-changed behavior.
+The PM architecture evolves incrementally across the investigated firmware
+versions.
 
-## Inherited
+At a high level:
 
-The following are substantially inherited:
+```text
+2.1.0
+  |
+  | baseline PM / WUP architecture
+  |
+  v
+2.1.3
+  |
+  | state 5 / psovrd2
+  | active override handling
+  | wake-ACK timing change
+  | recurring connected mDNS restart
+  |
+  v
+2.1.8
+  |
+  | post-association restoration changes
+  | mDNS cadence changed to ~180 s
+  | newer FMAC / protected WF200
+  |
+  v
+2.2.4
+  |
+  | expanded PM handling
+  | newer FMAC / protected WF200
+  | beacon statistics
+  | real_beacon_skip
+  | Beacon Recovery
+```
+
+The details of the firmware chronology are documented separately in:
+
+[`firmware-comparison.md`](firmware-comparison.md)
+
+---
+
+# 22. Firmware 2.1.0 → 2.1.3
+
+Substantially inherited behavior includes:
 
 - normal state-3 ordering
 - normal RSSI-dependent desired-skip mapping
@@ -938,100 +983,86 @@ The following are substantially inherited:
 - conditional final-sleep retention path
 - initialization sleep-resource asymmetry
 
-## Added or changed
-
-Firmware 2.1.3 adds or changes:
+Relevant additions or changes include:
 
 - state 5
 - `psovrd2`
-- named active-override handling
+- named active override
 - wake-ACK maximum wait
 - timeout logging
-- some event-coalescing behavior
-- periodic connected-state mDNS restart
+- event-handling changes
+- recurring connected mDNS restart
 
-The periodic mDNS mechanism is particularly important because it creates
-recurring network activity during otherwise connected operation.
+The mDNS change is important because it introduces recurring connected network
+activity without requiring a normal connection failure.
 
-Runtime testing subsequently confirmed that this mechanism produces periodic
-mDNS traffic.
-
-It is documented separately in:
-
-[`mdns-periodic-restart.md`](mdns-periodic-restart.md)
+Its quantitative battery contribution remains unresolved.
 
 ---
 
 # 23. Firmware 2.1.8 Post-Association Change
 
-Firmware 2.1.8 changes the post-association power-management sequence.
+Firmware 2.1.8 changes the post-association PM sequence.
 
 Earlier behavior is approximately:
 
 ```text
-association event
+association
         |
         v
-request state 3
+request normal state 3
 ```
 
-Firmware 2.1.8 adds:
+The 2.1.8 generation introduces an additional restoration sequence:
 
 ```text
-association event
+association
         |
         v
-restore state 4
+state 4 restoration
         |
         v
 scheduler delay
         |
         v
-request state 3
+state 3
 ```
 
-The delay is represented as:
+The identified delay is represented as:
 
 ```text
 100 scheduler ticks
 ```
 
-It should not be described as:
+It must not be described as:
 
 ```text
-100 milliseconds
+100 ms
 ```
 
-unless the scheduler tick duration is independently established.
+unless scheduler tick duration is independently established.
 
-The additional sequence performs more host-side operations.
-
-However, its energy effect depends on the state being restored.
-
-For example, restoration can potentially terminate an active temporary hold
-rather than extend it.
-
-Therefore the net energy effect remains unresolved.
-
-No unconditional new steady-state awake loop was identified from this
+No unconditional new steady-state awake loop has been identified from this
 sequence.
+
+Its quantitative energy effect remains unknown.
 
 ---
 
 # 24. Protected WF200 Firmware Boundary
 
-The protected WF200 firmware image provides an important version boundary.
+The protected WF200 image is also relevant to firmware comparison.
 
-Within the analyzed firmware set:
+Within the investigated set:
 
 ```text
 2.1.0
 2.1.3
 ```
 
-use the same protected WF200 image.
+use the same investigated protected WF200 generation.
 
-The image changes in:
+The protected image changes in:
 
 ```text
 2.1.8
@@ -1043,7 +1074,16 @@ and changes again in:
 2.2.4
 ```
 
-This matters for version comparison.
+The investigated WLAN component progression is approximately:
+
+| Firmware | FMAC | Protected WF200 |
+|---|---|---|
+| 2.1.0 | 3.3.2 | 3.12.2 |
+| 2.1.3 | 3.3.2 | 3.12.2 |
+| 2.1.8 | 3.4.1 | 3.14.0 |
+| 2.2.4 | 3.7.0 | 3.16.1 |
+
+This creates an important analysis boundary.
 
 For:
 
@@ -1051,9 +1091,8 @@ For:
 2.1.0 -> 2.1.3
 ```
 
-the protected WLAN firmware is controlled relatively well, allowing visible
-host-side changes to be compared while the protected WF200 image remains the
-same.
+host-side changes can be compared while the investigated protected WLAN
+generation remains constant.
 
 For:
 
@@ -1061,66 +1100,22 @@ For:
 2.1.3 -> 2.1.8
 ```
 
-both host-side behavior and the protected WF200 image change.
+and:
 
-A difference in actual WLAN behavior after 2.1.8 therefore cannot
-automatically be attributed to the visible host application.
+```text
+2.1.8 -> 2.2.4
+```
 
-The same caution applies when interpreting the additional protected-image
-change in 2.2.4.
+both visible host behavior and protected WLAN components change.
+
+A runtime difference therefore cannot automatically be attributed to either
+side without additional evidence.
 
 ---
 
-# 25. WF200 Power-Save Verification Gap
+# 25. Firmware 2.2.4 PM Expansion
 
-The host requests a WLAN power-save configuration through:
-
-```text
-command 0x52
-```
-
-but does not continuously verify every aspect of the resulting internal WF200
-behavior.
-
-Therefore:
-
-```text
-desired_beacon_skip = 20
-```
-
-means:
-
-```text
-the host requested the normal skip-20 configuration
-```
-
-It does not independently prove:
-
-```text
-every internal WF200 beacon-listening event exactly followed the host's
-assumed skip-20 model
-```
-
-The protected subsystem may contain:
-
-- internal retries
-- fallback behavior
-- timing compensation
-- DTIM handling
-- rejected-request behavior
-- other radio-side state transitions
-
-These details cannot be completely reconstructed from the host application
-alone.
-
-This verification gap is particularly relevant to the 2.2.4
-`real_beacon_skip` investigation.
-
----
-
-# 26. Firmware 2.2.4 Changes
-
-Firmware 2.2.4 adds substantial power-management-related logic.
+Firmware 2.2.4 expands several PM-related mechanisms.
 
 Identified changes include:
 
@@ -1130,22 +1125,25 @@ Identified changes include:
 - WF200 statistics command `0x66`
 - beacon statistics processing
 - `real_beacon_skip`
-- automatic beacon-recovery logic
+- automatic Beacon Recovery
 - temporary state-1 recovery
 
-The known recovery chain is:
+The new high-level chain is:
 
 ```text
 WF200 statistics
         |
         v
-beacon_rx_count
+received beacon count
+        |
+        v
+host measurement
         |
         v
 real_beacon_skip
         |
         v
-qualifying recovery predicate
+recovery decision
         |
         v
 state 1
@@ -1154,29 +1152,307 @@ state 1
 Active / Always-On
         |
         v
-deeper host sleep restricted
+temporary deeper-sleep restriction
         |
-        | approximately 5 seconds
         v
-restore saved / deferred state
+restore normal PM state
 ```
 
-On affected stock 2.2.4 devices, this sequence has been observed to recur
-approximately once per minute.
+This mechanism is separate from the ordinary state-3 power-save policy.
 
 ---
 
-# 27. 2.2.4 Beacon-Recovery Energy Path
+# 26. Beacon Statistics and PM Interaction
 
-During the normal recovery path:
+Firmware 2.2.4 periodically requests WF200 statistics using:
 
-1. the WLAN device is explicitly woken
-2. Active / Always-On WLAN mode is requested
-3. the WLAN-owned host sleep restriction remains active
-4. EM2 and EM3 are unavailable to the host while the restriction is held
-5. the temporary recovery countdown runs for approximately five seconds
-6. the saved or deferred application power state is restored
-7. normal beacon power saving can resume
+```text
+command 0x66
+```
+
+For the relevant host-side calculation:
+
+```text
+C = current received-beacon count
+P = previous received-beacon baseline
+R = cached real_beacon_skip
+```
+
+When a usable previous baseline exists:
+
+```text
+delta = C - P
+
+R = uint8_t(600 / delta)
+```
+
+The important PM-related observation is that `P` is not associated with an
+explicit elapsed-time value.
+
+Its validity therefore depends on the PM and scheduler context between the two
+samples.
+
+This creates a direct relationship between power-management transitions and
+Beacon Recovery measurement validity.
+
+For detailed counter analysis, see:
+
+[`beacon-rx-counter.md`](beacon-rx-counter.md)
+
+---
+
+# 27. Shared Override / Recovery Countdown `H`
+
+The same countdown object participates in temporary PM behavior relevant to
+the Beacon Recovery measurement path.
+
+For example:
+
+```text
+psovrd2
+        |
+        v
+H = 180
+        |
+        v
+state 5
+```
+
+Beacon Recovery uses:
+
+```text
+H = 5
+```
+
+during its temporary active interval.
+
+The periodic Beacon Recovery statistics block is gated by:
+
+```text
+H != 0
+```
+
+Conceptually:
+
+```text
+periodic measurement opportunity
+        |
+        v
+H != 0 ?
+   |         |
+  yes        no
+   |         |
+   v         v
+skip       acquire 0x66
+evaluation statistics
+```
+
+In stock firmware, an H-gated skipped measurement opportunity does not
+necessarily invalidate the previous baseline `P`.
+
+This is central to C1b.
+
+---
+
+# 28. Why PM Overrides Matter to Beacon Measurement
+
+Consider a simplified sequence:
+
+```text
+t0
+successful statistics sample
+P established
+        |
+        v
+temporary PM override
+H != 0
+        |
+        v
+one or more periodic measurement opportunities skipped
+        |
+        v
+P retained
+        |
+        v
+override expires
+        |
+        v
+later statistics sample C
+        |
+        v
+600 / (C - P)
+```
+
+The calculation still uses:
+
+```text
+600
+```
+
+even though the baseline may span substantially more than the logical interval
+that the constant assumes.
+
+The problem is therefore not necessarily:
+
+```text
+WF200 returned an incorrect cumulative counter
+```
+
+It can instead be:
+
+```text
+host compared correct cumulative values
+across an invalid measurement epoch
+```
+
+This distinction is fundamental to the current Patch C design.
+
+---
+
+# 29. C1b — Measurement-Window Validity
+
+The fixed-600 calculation has no corresponding elapsed-time measurement.
+
+Stock firmware can preserve `P` across identified conditions in which normal
+measurement continuity is broken.
+
+Relevant examples include PM override periods in which:
+
+```text
+H != 0
+```
+
+causes the periodic Beacon Recovery statistics evaluation to be skipped.
+
+Therefore the later calculation can operate on a baseline whose age no longer
+matches the assumed nominal measurement interval.
+
+### Classification
+
+Fixed numerator `600`:
+
+**PROVEN**
+
+No per-baseline elapsed-time normalization:
+
+**PROVEN**
+
+H-gated measurement suppression:
+
+**PROVEN**
+
+Stock baseline can survive identified skipped opportunities:
+
+**PROVEN**
+
+Host-side measurement-validity defect:
+
+**STRONGLY SUPPORTED**
+
+Exact first field trigger on affected devices:
+
+**UNKNOWN**
+
+---
+
+# 30. C1b Is Independent of WF200 Counter Correctness
+
+The exact protected-WF200 beacon-counter semantics remain useful for
+reconstructing the original design.
+
+They are not required to establish the host-side measurement-window problem.
+
+Even if:
+
+```text
+WF200 cumulative received-beacon counter
+is completely correct
+```
+
+the host can still perform an invalid comparison if:
+
+```text
+P and C
+```
+
+represent a longer or otherwise invalid logical measurement epoch while the
+formula continues to assume the nominal interval represented by:
+
+```text
+600
+```
+
+Therefore C1b is fundamentally a host-side data-validity issue.
+
+---
+
+# 31. C1a — Signed Control-Value Interpretation
+
+A separate defect exists after the ratio is calculated.
+
+The quotient is stored in one byte:
+
+```text
+R = uint8_t(600 / delta)
+```
+
+Stock recovery control subsequently loads the byte as signed.
+
+For example:
+
+```text
+delta = 3
+
+600 / 3 = 200
+0xC8 as signed int8 = -56
+```
+
+and:
+
+```text
+delta = 4
+
+600 / 4 = 150
+0x96 as signed int8 = -106
+```
+
+The stock predicate rejects zero and accepts signed values less than or equal
+to `2`.
+
+Therefore the fresh stock trigger domain becomes:
+
+```text
+delta = 3
+delta = 4
+delta = 201 .. 600
+```
+
+instead of only the ordinary positive quotient domain:
+
+```text
+delta = 201 .. 600
+```
+
+### Classification
+
+Signed interpretation:
+
+**PROVEN**
+
+Additional delta-3 / delta-4 triggers:
+
+**PROVEN**
+
+Control/measurement-validity defect:
+
+**STRONGLY SUPPORTED**
+
+---
+
+# 32. Normal Beacon Recovery
+
+When a fresh qualifying value is obtained, firmware 2.2.4 performs a real PM
+reconfiguration.
 
 Conceptually:
 
@@ -1184,7 +1460,13 @@ Conceptually:
 normal state 3
         |
         v
-qualifying real_beacon_skip
+fresh qualifying R
+        |
+        v
+Beacon Recovery
+        |
+        v
+H = 5
         |
         v
 state 1
@@ -1192,193 +1474,400 @@ state 1
         v
 Active / Always-On
         |
+        | approximately 5 serviced seconds
         v
-EM2 / EM3 restricted
-        |
-        | ~5 seconds
-        v
-restore state
+restore saved PM state
         |
         v
 normally state 3
 ```
 
-This is a technically credible source of additional energy consumption.
+This is not merely a log message.
 
-The electrical magnitude has not been measured.
+The recovery path genuinely requests a more active WF200 PM configuration and
+later restores the previous/normal configuration.
+
+Therefore a legitimate Beacon Recovery mechanism can have a useful reliability
+purpose.
+
+This is an important reason why simply removing the recovery action is not the
+preferred final correction.
 
 ---
 
-# 28. Recovery Does Not Require Poor RSSI
+# 33. Energy Relevance of Normal Recovery
 
-Runtime testing provided an important constraint.
+During the temporary recovery interval:
 
-Recurring recovery was observed while reported RSSI was approximately:
+1. the WLAN device is explicitly active
+2. Active / Always-On mode is requested
+3. the WLAN-owned deeper-sleep restriction remains held
+4. EM2 and EM3 are unavailable through that WLAN-owned restriction
+5. the temporary countdown is serviced
+6. the saved/deferred PM state is restored
+7. normal power saving can resume
+
+Conceptually:
 
 ```text
--58 to -59 dBm
+state 3
+        |
+        v
+Recovery
+        |
+        v
+state 1 / Active
+        |
+        v
+EM2 / EM3 restricted
+        |
+        | ~5 s
+        v
+restore
+        |
+        v
+state 3
 ```
 
-and the normal RSSI policy selected:
+This is a technically credible source of additional energy consumption.
+
+Its electrical magnitude has not yet been directly measured.
+
+A single legitimate recovery and a persistent approximately minute-spaced
+recovery loop must therefore be distinguished.
+
+---
+
+# 34. C2 — Post-Recovery Freshness Failure
+
+The most important repeating-control defect occurs after a qualifying recovery.
+
+Let:
 
 ```text
+P = previous received-beacon baseline
+R = cached real_beacon_skip
+```
+
+Stock recovery clears:
+
+```text
+P = 0
+```
+
+but preserves:
+
+```text
+R
+```
+
+The next successful statistics acquisition therefore begins with:
+
+```text
+P = 0
+R = historical qualifying value
+```
+
+Because `P == 0`, that sample cannot calculate a fresh ratio.
+
+It can only establish:
+
+```text
+P = C
+```
+
+However, stock control flow then evaluates the retained historical `R`.
+
+If it still qualifies:
+
+```text
+historical R
+        |
+        v
+Beacon Recovery again
+        |
+        v
+P = 0 again
+```
+
+The new baseline is therefore destroyed before a second comparable sample can
+be obtained.
+
+Conceptually:
+
+```text
+fresh qualifying R
+        |
+        v
+Recovery
+        |
+        +---- P = 0
+        |
+        +---- R retained
+        |
+        v
+next successful sample
+        |
+        v
+P = C
+        |
+        | no fresh R calculation
+        v
+historical R tested
+        |
+        v
+Recovery
+        |
+        v
+P = 0
+        |
+        v
+repeat
+```
+
+### Classification
+
+Post-recovery stale-control-evidence loop:
+
+**PROVEN**
+
+Fresh radio anomaly required for every repeated recovery:
+
+**FALSE**
+
+Normal PM restoration automatically breaks the loop:
+
+**FALSE**
+
+Original developer intent:
+
+**UNKNOWN**
+
+---
+
+# 35. No Normal Escape Within the Identified Stock Loop
+
+Starting from:
+
+```text
+P = 0
+R = qualifying historical value
+```
+
+each eligible successful statistics acquisition performs:
+
+```text
+install P
+        |
+        v
+evaluate unchanged R
+        |
+        v
+Recovery
+        |
+        v
+clear P
+```
+
+The two normal paths that calculate or clear `R` require conditions that are
+not reached in this repeating baseline-only cycle.
+
+Therefore, within the identified successful stock control flow, no normal
+escape exists once this state is established.
+
+Identified events that can break the cached relationship include:
+
+- startup/reset
+- a periodic command-`0x66` failure that clears both `P` and `R`
+- other explicit state resets where both relevant values are reinitialized
+
+Ordinary successful PM restoration does not clear the stale qualifying `R`.
+
+This is why the approximately minute-spaced loop can continue even after the
+underlying recovery action itself successfully restored the WF200 PM state.
+
+---
+
+# 36. First Trigger vs. Persistent Recovery
+
+The first qualifying recovery and the later persistent loop are separate
+questions.
+
+A normal clean start begins approximately as:
+
+```text
+P = 0
+R = 0
+```
+
+The first successful statistics acquisition establishes a baseline.
+
+A later comparable sample is required to calculate a fresh `R`.
+
+Therefore:
+
+```text
+startup
+        |
+        v
+baseline
+        |
+        v
+fresh measurement
+        |
+        v
+qualifying R
+        |
+        v
+first recovery
+```
+
+Only after that first qualifying recovery can C2 create:
+
+```text
+P = 0
+R = historical qualifying value
+```
+
+and make the behavior self-sustaining.
+
+This distinction is critical:
+
+> The mechanism that produces the first qualifying recovery does not have to be
+> the mechanism that causes every subsequent approximately minute-spaced
+> recovery.
+
+The exact first field trigger remains unknown.
+
+C1a and C1b provide demonstrated host-side mechanisms capable of producing
+invalid qualifying evidence.
+
+Genuine RF/WF200 conditions may also produce legitimate qualifying evidence.
+
+The exact contribution on the observed physical devices remains under
+investigation.
+
+---
+
+# 37. Runtime Recovery Across Different RSSI Policies
+
+Recurring recovery has been observed under more than one desired-skip regime.
+
+A stock 2.2.4 device showed recurring recovery with approximately:
+
+```text
+RSSI ≈ -58 to -60 dBm
 desired_beacon_skip = 20
 ```
 
-Therefore poor RSSI is not required for the 2.2.4 recovery mechanism to
-trigger.
+The mDNS-only Patch-B test device has also shown the stock Beacon Recovery loop
+with approximately:
 
-This does not establish that radio conditions have no effect.
+```text
+RSSI ≈ -75 to -77 dBm
+desired_beacon_skip = 15
+```
 
-It establishes only that weak signal strength is not a necessary condition for
-the observed recurring recovery.
+Therefore the recurring loop is not specific to:
 
-## Confidence
+```text
+strong RSSI
++
+desired skip 20
+```
 
-**RUNTIME CONFIRMED**
+This does not establish that RSSI or radio conditions are irrelevant.
+
+It establishes that one particular RSSI/desired-skip regime is not required
+for the repeating control-flow behavior.
 
 ---
 
-# 29. Periodic mDNS Activity
+# 38. Periodic mDNS Is a Separate Mechanism
 
-A separate recurring mechanism exists in the connected-state maintenance logic.
+Periodic connected mDNS restart behavior is distinct from Beacon Recovery.
 
-Firmware 2.1.3 introduced a periodic call equivalent to:
-
-```text
-mdns_resp_restart
-```
-
-Runtime packet capture confirmed recurring mDNS activity.
-
-Observed behavior included approximately:
+The investigated chronology is approximately:
 
 ```text
-2.1.3:
-~60-second recurring mDNS sequence
+2.1.0
+mDNS responder exists
+no comparable recurring connected restart identified
 
-stock 2.2.4:
-~180-second recurring mDNS sequence
+2.1.3
+~60 s recurring connected restart
+
+2.1.8
+modulo-three gate
+~180 s intended cadence
+
+2.2.4
+~180 s recurring behavior
 ```
 
-The 2.2.4 interval results from the connected minute-maintenance logic invoking
-the periodic restart on every third relevant cycle.
+Therefore the approximately three-minute mDNS cadence is not unique to 2.2.4.
 
-This is a separate mechanism from beacon recovery.
+It is already present in the investigated 2.1.8 host firmware.
 
-The two mechanisms can coexist:
-
-```text
-periodic mDNS activity
-```
-
-and:
-
-```text
-beacon recovery
-```
-
-but one should not automatically be assumed to cause the other.
+The mDNS mechanism and Beacon Recovery can coexist, but they should not be
+conflated.
 
 ---
 
-# 30. mDNS Isolation Experiment — Patch B
+# 39. Patch B — mDNS Isolation
 
-Patch B was created to suppress only the periodic connected-maintenance mDNS
-restart.
+Patch B suppresses the targeted recurring connected-maintenance mDNS restart.
 
-It does not modify:
+It does not intentionally modify:
 
 - state 1
 - state 3
 - command `0x52`
 - command `0x66`
-- `beacon_rx_count`
+- beacon statistics
 - `real_beacon_skip`
-- the beacon-recovery predicate
+- Beacon Recovery
 - WUP handling
-- host sleep-resource handling
+- general host sleep-resource handling
 - the protected WF200 image
 
-Runtime packet capture on the Patch-B device showed:
+Packet capture confirmed suppression of the targeted recurring mDNS sequence
+during the monitored test window.
 
-```text
-0 targeted recurring mDNS packets
-```
+Other event-driven mDNS behavior remains possible.
 
-during the monitored test window of at least approximately ten minutes.
-
-This confirms suppression of the targeted periodic mDNS path during that
-finite observation window.
-
-It does not mean that all mDNS functionality was globally disabled.
-
-Other event-driven mDNS callers remain intact.
-
----
-
-# 31. Beacon Recovery Continues with Patch B
-
-The Patch-B device continued to produce:
-
-```text
-Beacon skip error! Attempt recovery
-```
-
-approximately once per minute.
-
-The normal sequence remained:
-
-```text
-state 1
-        |
-        | ~5 seconds
-        v
-state 3
-```
-
-This continued even with good RSSI and:
-
-```text
-desired_beacon_skip = 20
-```
+Most importantly, Beacon Recovery continues on the Patch-B-only device.
 
 Therefore:
 
-> The periodic mDNS restart is not required for the recurring beacon-recovery
-> behavior under the tested conditions.
-
-This experimentally separates the two mechanisms.
-
-It does not prove that mDNS activity can never affect WLAN timing under any
-condition.
+> The periodic connected mDNS restart is not required for the observed
+> recurring Beacon Recovery loop under the tested conditions.
 
 ---
 
-# 32. Beacon-Recovery Isolation — Patch A
+# 40. Patch A — Beacon Recovery Isolation
 
-Patch A bypasses the identified 2.2.4 beacon-recovery action.
+Patch A bypasses the 2.2.4 Beacon Recovery action.
 
-It does not modify:
+It leaves intact:
 
 - normal RSSI-dependent desired skip
 - normal state 3
 - command `0x52`
-- WF200 statistics command `0x66`
-- `beacon_rx_count`
-- the `real_beacon_skip` calculation
+- command `0x66`
+- beacon statistics
+- `real_beacon_skip` calculation
 - WUP handling
-- general MCU sleep-resource handling
 - periodic mDNS behavior
-- the protected WF200 image
+- protected WF200 firmware
 
 Conceptually:
 
 ```text
-WF200 statistics
+statistics
         |
         v
-real_beacon_skip
+R
         |
         v
 recovery predicate
@@ -1387,424 +1876,649 @@ recovery predicate
 recovery action bypassed
 ```
 
-Runtime testing showed that the targeted recurring recovery sequence was
-suppressed while normal beacon-skip selection continued to operate.
+Patch A was useful as an experimental isolation mechanism.
 
-Patch A therefore isolates the host-side recovery consequence.
+It demonstrated that the recurring state-1 recovery sequence could be
+suppressed without removing normal connected PM behavior.
 
-It does not correct or explain the underlying WF200 beacon statistics.
+However, Patch A also suppresses legitimate recovery after a genuinely fresh
+qualifying measurement.
+
+For that reason it is no longer considered the preferred corrective design.
 
 ---
 
-# 33. Combined Patch A+B
-
-Patch A and Patch B were subsequently combined.
+# 41. Combined Patch A+B
 
 The combined experimental configuration suppresses:
 
 ```text
-Patch A:
-targeted beacon-recovery action
-
-Patch B:
-targeted periodic connected-state mDNS restart
-```
-
-while leaving the normal WLAN power-management architecture intact.
-
-In particular, the combined patch does not intentionally modify:
-
-- RSSI thresholds
-- normal state 3
-- desired beacon skip
-- command `0x52`
-- command `0x66`
-- WUP lifecycle
-- general host sleep-resource handling
-- the protected WF200 image
-
-This is important because it provides a controlled long-term test
-configuration without attempting to redesign the entire power-management
-system.
-
----
-
-# 34. Combined Patch Runtime Validation
-
-A physical TRV running the combined Patch A+B was monitored for multiple hours.
-
-During that monitored interval:
-
-```text
-Beacon skip error! Attempt recovery
-```
-
-was not observed.
-
-The recurring recovery-associated:
-
-```text
-Enter powersave state 1
-```
-
-was also absent.
-
-Normal connected operation remained functional.
-
-Normal RSSI-dependent beacon-skip behavior remained visible.
-
-Cloud connectivity remained operational during the tested period.
-
-Separate packet capture showed no targeted periodic mDNS sequence during the
-monitored mDNS test window.
-
-The correct interpretation is therefore:
-
-> Both targeted recurring mechanisms were suppressed during their respective
-> monitored test windows while normal connected operation continued.
-
-The test windows are finite.
-
-This does not establish:
-
-- indefinite stability
-- long-term battery improvement
-- elimination of every possible state-1 transition
-- elimination of all mDNS traffic
-- correction of the underlying WF200 beacon statistics
-- correction of the inherited conditional final-sleep path
-
----
-
-# 35. Why the Combined Patch Does Not Address the WUP Failure Path
-
-Patch A+B intentionally leaves the inherited lower-level sleep/resource
-handling unchanged.
-
-Therefore the combined patch does not modify the conditional path:
-
-```text
-device-sleep failure
-        |
-        v
-possible retained WUP / sleep resource
-```
-
-This is deliberate.
-
-The path already exists in firmware 2.1.0 and its runtime relevance has not
-been established.
-
-Changing it without understanding the exact hardware and driver state after a
-failure could create new instability.
-
-The current patching strategy therefore separates:
-
-```text
-confirmed recurring mechanisms
-```
-
-from:
-
-```text
-unconfirmed conditional failure mechanisms
-```
-
----
-
-# 36. Why a Sleep-Cleanup Patch Requires Care
-
-A retained-resource failure might superficially suggest a simple correction:
-
-```text
-sleep operation failed
-        |
-        v
-force WUP low
-force sleep-resource release
-```
-
-Such a modification would be unsafe without further analysis.
-
-If the WF200 or host transport still legitimately requires the MCU to remain
-available, forced release could cause:
-
-- lost WF200 interrupts
-- transport desynchronization
-- failed WLAN communication
-- driver-state corruption
-- unstable firmware behavior
-
-A safe correction would require establishing the complete driver and hardware
-state after the failure.
-
-An existing firmware cleanup or retry path would be preferable to inventing a
-new forced-release sequence.
-
-No such Patch C is currently part of the tested firmware.
-
----
-
-# 37. Current Experimental Patch Architecture
-
-The experimentally tested patch architecture currently consists of:
-
-```text
 Patch A
-Beacon-recovery bypass
+Beacon Recovery action
 ```
 
 and:
 
 ```text
 Patch B
-Periodic mDNS restart suppression
+periodic connected mDNS restart
 ```
 
-These have been tested both independently and together.
+while leaving the broader WLAN PM architecture intact.
 
-The resulting configurations include:
+The combined patch has operated on physical hardware with:
 
-```text
-stock 2.2.4
+- normal connected operation
+- cloud connectivity
+- normal desired beacon-skip selection
+- targeted recovery sequence absent during monitored windows
+- targeted periodic mDNS sequence absent during its monitored capture window
 
-Patch A only
+This establishes experimental compatibility.
 
-Patch B only
+It does not establish:
 
-Patch A+B
-```
+- indefinite stability
+- long-term battery improvement
+- correction of Beacon Recovery measurement validity
+- correction of the WUP/EM2 conditional path
+- elimination of all possible WLAN energy issues
 
-This modular approach is important because it allows the effects of the two
-identified recurring mechanisms to be separated experimentally.
-
-A hypothetical future sleep-cleanup modification should remain a separate
-experiment unless its runtime relevance is first established.
+Patch A+B remains an experimental isolation configuration rather than the
+preferred final correction.
 
 ---
 
-# 38. Battery-Drain Interpretation
+# 42. Why Patch A Is No Longer the Preferred Recovery Fix
 
-The current power-management evidence does not support a single-cause model.
+Further reverse engineering showed that the normal Beacon Recovery action
+performs a coherent PM reconfiguration:
+
+```text
+problematic beacon measurement
+        |
+        v
+temporarily request Active WLAN
+        |
+        v
+allow recovery interval
+        |
+        v
+restore normal power saving
+```
+
+Therefore the existence of the recovery mechanism itself is not sufficient to
+classify it as erroneous.
+
+The stronger defect is in the evidence used to trigger and retrigger it:
+
+```text
+C1a
+signed interpretation
+
+C1b
+invalid measurement epoch
+
+C2
+historical evidence reused as fresh evidence
+```
+
+A better correction should therefore preserve:
+
+```text
+legitimate fresh recovery
+```
+
+while preventing:
+
+```text
+invalid trigger
+or
+stale retrigger
+```
+
+This is the purpose of Patch C-C.
+
+---
+
+# 43. Patch C-C — Corrective PM Design
+
+Patch C-C is the current preferred Beacon Recovery correction candidate.
+
+Its objective is not:
+
+```text
+disable Beacon Recovery
+```
+
+Instead:
+
+```text
+preserve legitimate Beacon Recovery
+while correcting measurement/control validity
+```
+
+At a behavioral level it is designed to:
+
+1. preserve WF200 statistics acquisition
+2. preserve the diagnostic `real_beacon_skip` value
+3. preserve legitimate fresh Recovery
+4. correct the signed-control interpretation
+5. invalidate unusable measurement baselines
+6. prevent historical `R` from triggering on a baseline-only sample
+7. allow measurement progression after Recovery
+8. preserve unrelated PM behavior
+
+---
+
+# 44. Patch C-C and C1a
+
+The control decision is changed so that the cached byte is interpreted as
+unsigned for the Recovery predicate.
+
+Conceptually:
+
+```text
+stock:
+signed 8-bit R
+
+Patch C-C:
+unsigned 8-bit R
+```
+
+This removes the false qualifying interpretation of values such as:
+
+```text
+150 -> -106
+200 -> -56
+```
+
+while preserving:
+
+```text
+R = 1
+R = 2
+```
+
+as qualifying values.
+
+The diagnostic formatter remains separate.
+
+Therefore the corrective behavior targets the control interpretation rather
+than unnecessarily redesigning the diagnostic representation.
+
+---
+
+# 45. Patch C-C and C2
+
+Patch C-C distinguishes:
+
+```text
+baseline establishment
+```
+
+from:
+
+```text
+fresh ratio evaluation
+```
+
+If the current pass begins without a previous baseline:
+
+```text
+P == 0
+```
+
+the successful statistics sample establishes:
+
+```text
+P = C
+```
+
+but historical `R` is not used as fresh control evidence on that pass.
+
+Conceptually:
+
+```text
+post-recovery
+P = 0
+R = historical 2
+
+        |
+        v
+
+next successful sample
+P = C
+R retained diagnostically
+
+        |
+        v
+
+no recovery on baseline-only pass
+
+        |
+        v
+
+next comparable sample
+fresh delta
+fresh R
+```
+
+If the fresh later measurement is healthy:
+
+```text
+no Recovery
+```
+
+If the fresh later measurement genuinely qualifies:
+
+```text
+legitimate Recovery
+```
+
+This preserves both diagnostic history and control freshness.
+
+---
+
+# 46. Patch C-C and C1b
+
+Patch C-C also invalidates `P` at identified events that make the previous
+measurement epoch unsuitable for comparison.
+
+The reviewed design covers known logical invalidation events including:
+
+- H-gated measurement periods
+- missed relevant scheduler boundaries
+- relevant PM state/policy commits
+- PM completion
+- association/reassociation transitions
+- disconnect-related connection changes
+- known clock setter/reset paths
+- existing statistics-failure behavior
+
+The next successful sample after such invalidation becomes a baseline-only
+sample.
+
+This prevents an old counter baseline from being interpreted using the fixed
+nominal `600` model after a known invalid logical epoch.
+
+---
+
+# 47. Patch C-C Does Not Add a Physical Baseline Timestamp
+
+Patch C-C implements a logical measurement-validity model.
+
+It does **not** add a persistent physical timestamp to every `P`.
+
+Therefore it should not be described as mathematically proving that every
+future counter interval is exactly the nominal physical duration.
+
+The design instead ensures that identified firmware events known to invalidate
+measurement continuity also invalidate the baseline.
+
+Remaining runtime questions include:
+
+- unusually delayed callback execution
+- physical RF transition completion
+- very long external PM transactions
+- persistent policy churn
+- exact physical sample age
+
+These require hardware qualification.
+
+---
+
+# 48. PM Completion Matters to C1b
+
+An important refinement in the current Patch C-C design is that invalidation is
+not limited to PM entry.
+
+PM completion also invalidates the previous beacon baseline.
+
+This matters because a PM reconfiguration has a duration.
+
+Conceptually:
+
+```text
+old measurement epoch
+        |
+        v
+PM transition begins
+        |
+        v
+radio configuration changes
+        |
+        v
+PM transition completes
+        |
+        v
+old P invalidated
+        |
+        v
+next successful sample establishes new baseline
+```
+
+Without completion-side invalidation, a baseline collected during a sufficiently
+long transition could potentially survive into the new PM regime.
+
+The current design therefore treats PM transitions as measurement-epoch
+boundaries rather than only control-state changes.
+
+---
+
+# 49. Measurement Serialization
+
+Patch C-C also addresses a race identified during design review.
+
+The relevant problem is conceptually:
+
+```text
+measurement code checks P != 0
+        |
+        v
+asynchronous PM/connection path invalidates P
+        |
+        v
+measurement code reloads or uses changed state
+```
+
+This could create inconsistent measurement/control decisions.
+
+The current design therefore serializes the critical measurement-decision
+section using a short interrupt-mask critical section.
+
+The critical section begins only after the WF200 statistics acquisition.
+
+No added blocking WF200 operation is intentionally performed while the new
+critical section is held.
+
+The goal is to protect:
+
+```text
+P / measurement-decision consistency
+```
+
+not to hold interrupts across the complete radio transaction.
+
+Runtime interrupt-latency behavior still requires hardware qualification.
+
+---
+
+# 50. Static Qualification of Patch C-C
+
+Patch C-C has completed a dedicated static pre-build qualification pass.
+
+The review included:
+
+- patch-site verification
+- instruction-boundary verification
+- branch/call verification
+- helper liveness
+- register/flag behavior
+- baseline-state scenarios
+- C1a exhaustive byte-domain reasoning
+- C2 control-flow verification
+- PM invalidation paths
+- race analysis
+- appended-flash placement
+- GBL growth requirements
+- falsification scenarios
+
+The result was:
+
+```text
+PASS STATIC PRE-BUILD QUALIFICATION
+```
+
+No known static blocker was identified.
+
+This means an experimental build is justified.
+
+It does **not** mean:
+
+```text
+hardware behavior proven
+```
+
+or:
+
+```text
+battery improvement proven
+```
+
+---
+
+# 51. Patch C-C and the Existing PM Architecture
+
+Patch C-C intentionally avoids redesigning the complete WLAN PM system.
+
+It preserves:
+
+- normal state 3
+- RSSI-dependent desired skip
+- state 1 Recovery
+- state 5
+- command `0x52`
+- command `0x66`
+- protected WF200 firmware
+- diagnostic `real_beacon_skip`
+- normal restoration logic
+- existing WUP lifecycle
+
+Its primary modifications concern:
+
+```text
+measurement validity
++
+control-evidence freshness
++
+short serialization of related host state
+```
+
+This is important because the objective is to correct demonstrated defects
+without removing legitimate WLAN reliability behavior.
+
+---
+
+# 52. WUP/EM2 Remains Separate from Patch C-C
+
+Patch C-C does not modify the inherited conditional WUP/resource-retention
+path.
+
+This is deliberate.
+
+The current evidence supports:
+
+```text
+WUP/resource-retention path exists
+```
+
+but not:
+
+```text
+WUP/resource-retention path occurs frequently in normal field operation
+```
+
+and not:
+
+```text
+WUP/resource-retention path caused the historical battery drain
+```
+
+Changing it without stronger evidence would combine two independent research
+questions and could introduce unnecessary WLAN instability.
+
+The WUP/EM2 investigation therefore remains separate.
+
+---
+
+# 53. D3 Power-Save Errors
+
+Firmware 2.2.4 contains diagnostic reasons for WF200 power-save errors.
+
+The identified reasons include conditions corresponding approximately to:
+
+```text
+0
+AP did not provide buffered unicast after PS-Poll
+
+1
+AP did not provide buffered unicast after U-APSD trigger
+
+2
+AP indicated buffered unicast but none was delivered
+during multiple consecutive beacons
+
+3
+unstable AP beacon timing / beacon-window adjustment
+```
+
+These diagnostics demonstrate that real AP/WF200 power-save edge conditions
+are considered by the firmware.
+
+However, no direct host-side control/data-flow edge has been established from:
+
+```text
+D3 power-save error
+```
+
+to:
+
+```text
+Beacon Recovery
+```
+
+Therefore:
+
+```text
+D3 causes Beacon Recovery
+```
+
+is not established.
+
+Radio-internal behavior could still influence later beacon statistics.
+
+That remains an inference rather than a proven host-side causal chain.
+
+---
+
+# 54. Periodic mDNS and PM
+
+Periodic mDNS creates a separate recurring WLAN workload.
+
+The chronology is:
+
+```text
+2.1.0
+mDNS exists
+no comparable recurring connected caller identified
+
+2.1.3
+~60 s recurring restart
+
+2.1.8
+~180 s gated restart
+
+2.2.4
+~180 s recurring restart
+```
+
+mDNS activity may cause normal WLAN communication and wake activity.
+
+However, the Patch-B experiment demonstrates that the stock Beacon Recovery
+loop can continue without the targeted periodic mDNS restart.
+
+Therefore the two mechanisms must be analyzed separately.
+
+Their combined quantitative energy contribution remains unknown.
+
+---
+
+# 55. Historical Battery-Drain Interpretation
+
+The current PM evidence does not support a single-cause historical model.
 
 A more appropriate working model is:
 
 ```text
 baseline device consumption
         +
-normal motor activity
+normal valve/motor activity
         +
-normal cloud / network activity
+normal cloud/network activity
         +
-version-dependent recurring activity
+periodic connected mDNS activity
         +
-possible conditional failure states
+firmware-specific WLAN PM behavior
+        +
+2.2.4 Beacon Recovery
+        +
+possible conditional sleep-resource retention
+        +
+radio/environmental effects
 ```
 
-Potential version-dependent contributions include:
+This is a qualitative model.
 
-```text
-2.1.3+
-periodic mDNS activity
-```
+It is not a quantitative energy budget.
 
-and:
+Importantly, battery drain has also been observed on firmware 2.1.8.
 
-```text
-2.2.4
-beacon-recovery activity
-```
+Therefore the 2.2.4 Beacon Recovery mechanism cannot explain the complete
+historical problem.
 
-A separate inherited conditional mechanism is:
+The strongest supported interpretation is:
 
-```text
-final device-sleep failure
-        |
-        v
-possible retained WUP / host sleep restriction
-```
-
-The historical evidence is important here.
-
-Battery drain was also observed historically on firmware 2.1.8.
-
-Therefore the 2.2.4 beacon-recovery mechanism cannot currently be described as
-the original or sole cause of the historical battery-drain problem.
-
-Likewise, firmware 2.1.3 has not been established as universally free of the
-problem.
-
-The supported interpretation is:
-
-> Firmware 2.2.4 contains an additional recurring recovery mechanism that
-> plausibly adds energy consumption on affected devices.
-
-Its quantitative contribution remains to be determined by long-term testing.
+> Firmware 2.2.4 contains an additional Beacon Recovery control problem capable
+> of creating repeated temporary Active-WLAN intervals, while at least one
+> additional explanation is required for battery drain observed on earlier
+> firmware.
 
 ---
 
-# 39. Evidence Classification
+# 56. Current PM / Beacon-Recovery Model
 
-| Finding | Status |
-|---|---|
-| Normal RSSI-dependent desired skip policy is equivalent across the analyzed versions | **PROVEN** |
-| State 3 is the normal RSSI-dependent power-save state | **PROVEN** |
-| State 1 requests a more active WLAN condition | **PROVEN** |
-| State 1 can restrict deeper host sleep | **PROVEN** |
-| State 5 appears in firmware 2.1.3 | **PROVEN** |
-| State 5 is associated with external `psovrd2` | **PROVEN** |
-| State 5 requests Fast Power Save with skip 10 | **PROVEN** |
-| State 5 uses a restoration countdown of 180 serviced seconds | **PROVEN** |
-| Successful state-5 handling can release WUP and the WLAN-owned sleep contribution | **PROVEN** |
-| Repeated external `psovrd2` requests can refresh the state-5 countdown | **PROVEN** |
-| The core conditional final-sleep/WUP retention path already exists in 2.1.0 | **PROVEN** |
-| Command-`0x52` failure alone does not prove retained WUP | **PROVEN** |
-| 2.1.8 changes the post-association PM sequence | **PROVEN** |
-| 2.2.4 introduces the known counter-derived beacon-recovery mechanism | **PROVEN** |
-| Beacon recovery requests Active / Always-On | **PROVEN** |
-| Beacon recovery restricts host EM2/EM3 during the recovery window | **PROVEN** |
-| Normal recovery lasts approximately five seconds | **PROVEN** |
-| Recovery can recur approximately once per minute on affected stock 2.2.4 devices | **RUNTIME CONFIRMED** |
-| Recovery can occur with good RSSI and desired skip 20 | **RUNTIME CONFIRMED** |
-| Periodic mDNS activity occurs on stock 2.1.3 and 2.2.4 | **RUNTIME CONFIRMED** |
-| Patch B suppresses the targeted periodic mDNS path during the monitored test window | **RUNTIME CONFIRMED** |
-| Beacon recovery continues with Patch B | **RUNTIME CONFIRMED** |
-| Periodic mDNS is required for beacon recovery | **NOT SUPPORTED** |
-| Patch A suppresses the targeted recurring beacon-recovery action | **RUNTIME CONFIRMED** |
-| Combined Patch A+B suppresses both targeted recurring mechanisms during monitored tests | **RUNTIME CONFIRMED** |
-| Combined Patch A+B fixes the historical battery drain | **NOT PROVEN** |
-| The inherited WUP/resource-retention path occurs during ordinary runtime | **UNRESOLVED** |
-| The inherited WUP/resource-retention path caused the historical battery drain | **NOT PROVEN** |
-| State 5 caused the historical battery drain | **NOT PROVEN** |
-| Firmware 2.1.3 was the first battery-drain firmware | **NOT PROVEN** |
-| 2.2.4 beacon recovery is the sole battery-drain root cause | **NOT PROVEN** |
-| Quantitative electrical cost of beacon recovery | **UNRESOLVED** |
-| Quantitative electrical cost of periodic mDNS activity | **UNRESOLVED** |
-| Long-term battery improvement from Patch A+B | **UNDER TEST** |
-
----
-
-# 40. Current Research Direction
-
-The power-management investigation now separates three tracks.
-
-## Track A — Long-Term Battery Comparison
-
-The primary practical test is comparison of:
+The current combined model is:
 
 ```text
-stock 2.2.4
+                         APPLICATION
+                             |
+                             v
+                      requested PM state
+                             |
+                 +-----------+-----------+
+                 |                       |
+                 v                       v
+          normal state 3          temporary states
+                                  1 / 5 / restore
+                 |                       |
+                 +-----------+-----------+
+                             |
+                             v
+                       host WF200 driver
+                             |
+                             v
+                       command 0x52
+                             |
+                             v
+                    protected WF200 state
+                             |
+                             v
+                    device-sleep handling
+                             |
+                 +-----------+-----------+
+                 |                       |
+              success                  failure
+                 |                       |
+                 v                       v
+           WUP released          possible retained
+           resource released     WUP / sleep resource
+                 |
+                 v
+          deeper MCU sleep possible
 ```
 
-against:
-
-```text
-patched 2.2.4
-```
-
-with the tested patch variants kept clearly identified.
-
-Important observations include:
-
-- battery voltage
-- reported battery percentage
-- runtime
-- beacon statistics
-- recovery counters
-- firmware variant
-- motor activity where available
-
-Cross-device battery comparisons must be interpreted carefully because
-different devices and batteries introduce confounding factors.
-
-Longer observation windows are more useful than short percentage changes.
-
----
-
-## Track B — WF200 Beacon Statistics
-
-The principal unresolved technical question behind the 2.2.4 recovery is:
-
-> Why do the WF200 beacon statistics produce counter deltas that firmware
-> 2.2.4 interprets as an invalid `real_beacon_skip`?
-
-This includes determining:
-
-- exact `beacon_rx_count` semantics
-- exact `beacon_rx_missed_count` semantics
-- intentional beacon-skip behavior
-- DTIM interaction
-- whether the host-side `600 / delta` interpretation is appropriate
-
-This work is documented in:
-
-[`beacon-rx-counter.md`](beacon-rx-counter.md)
-
-and:
-
-[`real-beacon-skip.md`](real-beacon-skip.md)
-
----
-
-## Track C — Conditional Sleep Failures
-
-The inherited WUP / host-sleep-resource retention path remains technically
-interesting.
-
-However, its runtime relevance has not been demonstrated.
-
-It should therefore remain separate from the experimentally confirmed
-recurring mechanisms.
-
-Future work should first determine whether the condition actually occurs on
-real devices before attempting a firmware modification.
-
----
-
-# 41. Current Working Model
-
-The current power-management model is:
-
-```text
-                    APPLICATION
-                         |
-                         v
-                 requested PM state
-                         |
-             +-----------+-----------+
-             |                       |
-             v                       v
-       normal state 3          temporary states
-                               1 / 5 / restore
-             |                       |
-             +-----------+-----------+
-                         |
-                         v
-                  host WF200 driver
-                         |
-                         v
-                   command 0x52
-                         |
-                         v
-               protected WF200 state
-                         |
-                         v
-                device-sleep handling
-                         |
-             +-----------+-----------+
-             |                       |
-          success                  failure
-             |                       |
-             v                       v
-       WUP released          possible retained
-       sleep resource        WUP / sleep resource
-       released
-             |
-             v
-     deeper MCU sleep possible
-```
-
-Firmware 2.2.4 adds another recurring input:
+Firmware 2.2.4 adds:
 
 ```text
 WF200 command 0x66
@@ -1813,156 +2527,447 @@ WF200 command 0x66
 beacon statistics
         |
         v
-real_beacon_skip
+C / P measurement
         |
         v
-recovery predicate
+600 / delta
+        |
+        v
+cached R
+        |
+        v
+Recovery decision
         |
         v
 temporary state 1
 ```
 
-Firmware 2.1.3 and later also contain a separate recurring connected-state
-mDNS mechanism.
+Three host-side validity problems are now distinguished:
+
+```text
+C1a
+signed interpretation of R
+
+C1b
+measurement-window / baseline validity
+
+C2
+historical R reused as fresh control evidence
+```
+
+The separate mDNS path is:
+
+```text
+connected maintenance
+        |
+        v
+periodic mDNS restart
+        |
+        v
+network traffic
+```
+
+The separate conditional sleep-resource path is:
+
+```text
+device-sleep failure
+        |
+        v
+possible retained WUP / host sleep restriction
+```
 
 These mechanisms must not be conflated.
 
 ---
 
-# 42. Current Conclusion
+# 57. Evidence Summary
 
-The Shelly TRV power-management system consists of multiple interacting layers.
+| Finding | Status |
+|---|---|
+| Application PM state, host sleep resources, and WF200 internal state are distinct layers | **PROVEN** |
+| State 3 is the normal connected RSSI-dependent PM state | **PROVEN** |
+| Desired skip mapping is 20 / 15 / 10 for the identified RSSI ranges | **PROVEN** |
+| State 1 requests Active / Always-On WLAN | **PROVEN** |
+| State 1 restricts deeper host sleep through the WLAN-owned resource | **PROVEN** |
+| Beacon Recovery uses temporary state 1 | **PROVEN** |
+| State 5 exists by firmware 2.1.3 | **PROVEN** |
+| State 5 is associated with `psovrd2` | **PROVEN** |
+| State 5 requests Fast Power Save with skip 10 | **PROVEN** |
+| State 5 uses a 180-serviced-second restoration countdown | **PROVEN** |
+| State 5 intentionally keeps the host fully awake for 180 seconds | **FALSE** |
+| Repeated external `psovrd2` can refresh the countdown | **PROVEN** |
+| Shared `H` also gates Beacon Recovery measurement processing | **PROVEN** |
+| Stock H-gated measurement suppression can preserve old `P` | **PROVEN** |
+| Command `0x52` failure alone proves retained WUP | **FALSE** |
+| Conditional final-sleep failure can skip normal WUP/resource release | **PROVEN** |
+| Fundamental conditional WUP-retention path already exists in 2.1.0 | **PROVEN** |
+| WUP-retention path occurs frequently during ordinary field operation | **UNKNOWN** |
+| WUP-retention path caused the historical drain | **UNKNOWN** |
+| 2.1.8 changes post-association PM sequencing | **PROVEN** |
+| Protected WF200 generation changes in 2.1.8 and again in 2.2.4 | **PROVEN** |
+| 2.2.4 introduces the identified counter-derived Beacon Recovery chain | **PROVEN** |
+| Normal Beacon Recovery genuinely reconfigures WF200 PM | **PROVEN** |
+| Normal recovery lasts approximately five serviced seconds | **PROVEN** |
+| Recovery can recur approximately once per minute on affected devices | **PROVEN** |
+| Recurring recovery requires poor RSSI | **FALSE** |
+| Recurring recovery is specific to desired skip 20 | **FALSE** |
+| `real_beacon_skip` control uses signed byte interpretation in stock firmware | **PROVEN** |
+| Signed interpretation adds delta 3 and 4 to the fresh trigger domain | **PROVEN** |
+| Fixed-600 measurement has no corresponding baseline timestamp | **PROVEN** |
+| Identified PM/scheduler events can invalidate measurement continuity | **PROVEN** |
+| Stock can preserve `P` across identified invalid measurement opportunities | **PROVEN** |
+| C1b represents a host-side measurement-validity defect | **STRONGLY SUPPORTED** |
+| Recovery clears `P` while preserving qualifying `R` | **PROVEN** |
+| Baseline-only post-recovery sample can evaluate historical `R` | **PROVEN** |
+| C2 can create a self-sustaining Recovery loop | **PROVEN** |
+| Every repeated recovery requires a fresh radio anomaly | **FALSE** |
+| Normal PM restoration breaks C2 | **FALSE** |
+| Exact first field trigger is known | **UNKNOWN** |
+| Periodic mDNS is required for Beacon Recovery | **FALSE under tested conditions** |
+| ~180-s mDNS gating already exists in investigated 2.1.8 host firmware | **PROVEN** |
+| Patch A suppresses Beacon Recovery action | **PROVEN** |
+| Patch A preserves legitimate fresh Recovery | **FALSE** |
+| Patch B suppresses the targeted recurring mDNS restart | **PROVEN during monitored test** |
+| Patch C-C preserves the intended Recovery mechanism by design | **PROVEN statically** |
+| Patch C-C corrects C1a in the reviewed control path | **PROVEN statically** |
+| Patch C-C prevents historical `R` from triggering a baseline-only sample | **PROVEN statically** |
+| Patch C-C invalidates identified unusable logical measurement epochs | **PROVEN statically** |
+| Patch C-C passed static pre-build qualification | **PROVEN** |
+| Patch C-C has passed hardware qualification | **NO** |
+| Patch C-C improves battery endurance | **UNKNOWN** |
+| Beacon Recovery quantitative electrical cost is known | **UNKNOWN** |
+| Periodic mDNS quantitative electrical cost is known | **UNKNOWN** |
 
-The application requests power states.
+---
 
-The host driver coordinates WUP and MCU sleep resources.
+# 58. Current Research Direction
 
-The protected WF200 subsystem implements the actual WLAN power-save behavior.
+The power-management investigation now separates four main tracks.
 
-The most important findings are:
+## Track A — Patch C-C Build and Hardware Qualification
+
+The next step for Beacon Recovery is no longer additional speculative patch
+design.
+
+The current design has passed static pre-build qualification.
+
+The next sequence is:
 
 ```text
-normal state 3
+growth-aware GBL build
+        |
+        v
+independent binary verification
+        |
+        v
+controlled hardware flash
+        |
+        v
+functional qualification
+        |
+        v
+long-term A/B observation
 ```
 
-is not equivalent to a direct measurement of the final electrical state;
+Hardware testing should verify:
+
+- boot reliability
+- WLAN association
+- cloud connectivity
+- thermostat operation
+- valve/motor operation
+- normal state-3 behavior
+- RSSI-dependent desired skip
+- Beacon Recovery after genuinely fresh qualifying evidence
+- elimination of the C2 stale loop
+- C1a behavior
+- re-baselining after PM overrides
+- reassociation/disconnect behavior
+- AP restart behavior
+- clock-change behavior
+- interrupt responsiveness
+- long-term stability
+
+---
+
+## Track B — First-Trigger Investigation
+
+C2 explains the persistent loop after the first qualifying recovery.
+
+It does not establish what caused that first recovery on the affected physical
+device.
+
+Important future evidence includes a continuous trace from:
 
 ```text
-state 5
+boot
 ```
 
-is a temporary externally triggered Fast Power Save override, not a
-three-minute continuous-awake state;
+through:
 
 ```text
-the conditional WUP/resource-retention path
+first baseline
 ```
 
-already exists in firmware 2.1.0 and has not been demonstrated as a runtime
-battery-drain mechanism;
+to:
 
 ```text
-firmware 2.2.4 beacon recovery
+first qualifying fresh R
 ```
-
-is an additional automatic mechanism that temporarily requests Active /
-Always-On WLAN operation and restricts deeper host sleep for approximately five
-seconds;
 
 and:
 
 ```text
-periodic mDNS
+first Recovery
 ```
 
-is a separate recurring mechanism that can be experimentally suppressed
-without eliminating beacon recovery.
+Relevant state should include:
 
-Patch A and Patch B therefore isolate two separate recurring behaviors:
+- current received-beacon counter
+- previous baseline
+- cached `real_beacon_skip`
+- `H`
+- PM state
+- desired beacon skip
+- RSSI
+- connection/association state
+- relevant D3 diagnostics
+- timing of PM overrides
+
+---
+
+## Track C — Long-Term Battery Comparison
+
+Battery voltage remains more useful than short-term percentage changes.
+
+Important observations include:
+
+- battery voltage
+- battery percentage
+- uptime
+- firmware variant
+- recovery activity
+- beacon statistics
+- RSSI
+- motor activity where available
+- resets/reboots
+- major network events
+
+Cross-device comparison must remain cautious because battery cells and devices
+introduce confounding factors.
+
+Longer observation windows are required.
+
+---
+
+## Track D — WUP / EM2 Investigation
+
+The conditional resource-retention path remains technically important.
+
+However, before any modification is justified, future work should establish:
+
+1. whether the path occurs during ordinary field operation
+2. what event causes it
+3. whether the resource remains retained
+4. whether later WLAN activity repairs it
+5. whether it produces measurable elevated current
+6. whether an existing safe cleanup path exists
+
+Until then, WUP/EM2 should remain unpatched.
+
+---
+
+# 59. Current Conclusion
+
+The Shelly TRV Gen1 power-management system consists of multiple interacting
+layers:
 
 ```text
-Patch A
-        ->
-beacon recovery suppressed
+application PM state
+        |
+        v
+host driver / WUP / MCU sleep resources
+        |
+        v
+protected WF200 power-management state
 ```
+
+These layers must not be treated as equivalent.
+
+The investigation currently establishes several separate mechanisms.
+
+Normal connected operation uses:
 
 ```text
-Patch B
-        ->
-periodic mDNS restart suppressed
+state 3
 ```
 
-and the combined Patch A+B has operated normally during the monitored test
-windows with both targeted recurring mechanisms absent.
+with RSSI-dependent Fast Power Save.
 
-The remaining questions are now primarily quantitative and lower-level:
+State 5 is:
 
-1. how much battery energy the recurring mechanisms actually consume
-2. why the WF200 beacon statistics cause the 2.2.4 recovery predicate to
-   qualify
-3. whether the inherited conditional sleep-resource failure occurs during real
-   operation
-4. whether suppressing the confirmed recurring mechanisms materially improves
-   long-term battery endurance
+```text
+temporary
+externally triggered
+Fast Power Save / skip 10
+```
 
-No current evidence justifies describing any one of these mechanisms as the
-sole historical battery-drain root cause.
+and does not intentionally keep the host fully awake for three minutes.
+
+A conditional lower-level WUP/resource-retention path exists, but it is
+inherited from older firmware and has not been demonstrated as a normal
+runtime battery-drain mechanism.
+
+Firmware 2.2.4 adds a new automatic Beacon Recovery mechanism that temporarily
+requests:
+
+```text
+state 1
+Active / Always-On WLAN
+```
+
+for approximately five serviced seconds before restoring normal PM behavior.
+
+The Recovery mechanism itself has a coherent reliability function.
+
+The principal defects identified around it are instead:
+
+```text
+C1a
+signed control-value interpretation
+
+C1b
+invalid measurement-window / baseline handling
+
+C2
+historical qualifying evidence reused after Recovery
+```
+
+C2 explains why one qualifying recovery can become a persistent approximately
+minute-spaced loop without requiring a new radio anomaly on every cycle.
+
+C1a and C1b provide host-side mechanisms capable of producing invalid first
+qualifying evidence, although the exact first field trigger on the affected
+physical devices remains unknown.
+
+Periodic mDNS is a separate recurring WLAN workload.
+
+Its recurring connected restart exists by firmware 2.1.3, changes to an
+approximately 180-second gated cadence by 2.1.8, and remains present in 2.2.4.
+
+Patch B demonstrates that the targeted mDNS restart is not required for the
+observed Beacon Recovery loop.
+
+Patch A demonstrated that the Recovery action can be isolated, but it also
+removes legitimate Recovery and is therefore no longer the preferred
+correction.
+
+Patch C-C instead attempts to preserve the intended PM Recovery mechanism while
+correcting:
+
+```text
+control interpretation
+measurement validity
+control-evidence freshness
+```
+
+Patch C-C has passed static pre-build qualification.
+
+It has not yet passed hardware qualification.
+
+Finally, none of these findings currently justifies describing one mechanism
+as the complete historical Shelly TRV Gen1 battery-drain root cause.
+
+Battery drain has also been observed on firmware 2.1.8.
+
+The current evidence therefore supports a multi-mechanism investigation rather
+than a single-cause explanation.
 
 ---
 
 # Related Documents
 
-- [`Firmware Comparison`](firmware-comparison.md)
-- [`Periodic mDNS Restart`](mdns-periodic-restart.md)
-- [`Beacon RX Counter`](beacon-rx-counter.md)
-- [`Real Beacon Skip`](real-beacon-skip.md)
-- [`Recovery Mechanism`](recovery-mechanism.md)
-- [`AP Selection and Roaming`](ap-selection-and-roaming.md)
-- [`Experimental Beacon-Recovery Patch`](../patch/README.md)
-- [`Battery Testing`](../testing/battery-testing.md)
+Firmware chronology:
+
+[`firmware-comparison.md`](firmware-comparison.md)
+
+Periodic mDNS:
+
+[`mdns-periodic-restart.md`](mdns-periodic-restart.md)
+
+Beacon counter and baseline handling:
+
+[`beacon-rx-counter.md`](beacon-rx-counter.md)
+
+`real_beacon_skip` arithmetic:
+
+[`real-beacon-skip.md`](real-beacon-skip.md)
+
+Beacon Recovery control flow:
+
+[`recovery-mechanism.md`](recovery-mechanism.md)
+
+AP selection and roaming:
+
+[`ap-selection-and-roaming.md`](ap-selection-and-roaming.md)
+
+Experimental patch documentation:
+
+[`../patch/README.md`](../patch/README.md)
+
+Battery testing:
+
+[`../testing/battery-testing.md`](../testing/battery-testing.md)
 
 ---
 
 # Research Methodology
 
 This investigation is based on static reverse engineering of locally obtained
-Shelly TRV Gen1 firmware images together with runtime observations from
-personally owned devices.
+Shelly TRV Gen1 firmware together with runtime observations from personally
+owned devices.
 
 The analysis includes:
 
-- comparison of firmware versions
-- host-side power-state control flow
+- cross-version firmware comparison
+- native ARM Thumb control-flow analysis
+- host-side PM state analysis
 - WF200 command handling
-- WUP lifecycle
+- WUP lifecycle analysis
 - MCU sleep-resource handling
 - beacon-statistics processing
 - passive network capture
 - stock and experimentally patched runtime testing
+- independent static falsification of corrective patch designs
 
-Publicly available Silicon Labs WF200/fullMAC information was used where
-necessary to interpret host-visible WLAN interface behavior.
+Important conclusions are checked against native instructions and control flow
+rather than relying only on decompiler output.
+
+Publicly available WF200/fullMAC information is used where necessary to
+interpret host-visible WLAN interface behavior.
 
 The protected WF200 implementation is not reproduced.
 
-No firmware images, complete proprietary functions or complete disassemblies
-are published in this document.
-
-The classifications:
+The project deliberately separates:
 
 ```text
 PROVEN
-RUNTIME CONFIRMED
-STRONG INFERENCE
-PLAUSIBLE
-NOT SUPPORTED
-NOT PROVEN
-UNRESOLVED
-UNDER TEST
+STRONGLY SUPPORTED
+INFERENCE
+UNKNOWN
 ```
 
-are deliberately used to distinguish static evidence, runtime evidence and
-interpretation.
+and distinguishes:
+
+```text
+firmware behavior
+runtime observation
+engineering interpretation
+battery hypothesis
+```
+
+No original or modified Shelly firmware images, complete proprietary
+functions, or large raw disassemblies are published in this document.
 
 ---
 
@@ -1978,5 +2983,5 @@ All product names and trademarks belong to their respective owners.
 The findings documented here describe observed and reverse-engineered behavior
 of the tested firmware versions.
 
-No conclusions about the intentions of the original developers are inferred
-from these technical findings.
+No conclusion about the intentions of the original developers is made unless
+independently supported by technical evidence.

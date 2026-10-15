@@ -1,445 +1,128 @@
-# Shelly TRV Gen1 – Firmware Analysis and Battery-Drain Investigation
+# Shelly TRV Gen1 – Battery-Drain Investigation
 
-Reverse engineering, runtime analysis and experimental firmware research for the
-Shelly TRV Gen1 (`SHTRV-01`).
+Reverse engineering, runtime analysis, long-term battery testing, and experimental firmware research for the Shelly TRV Gen1 (`SHTRV-01`).
 
-The project started with an investigation into unusually high battery drain
-observed on Shelly TRV Gen1 devices running firmware 2.2.4.
+This project investigates the unusually high battery consumption observed on Shelly TRV Gen1 devices and attempts to identify the firmware mechanisms that contribute to it.
 
-During the investigation, multiple firmware generations were compared and
-several WLAN power-management and recurring network mechanisms were identified.
+The research currently focuses on firmware generations from `2.1.0` through `2.2.4`, with firmware `2.2.4` as the primary reverse-engineering target.
 
-The current evidence strongly suggests that the observed battery-runtime behavior
-should not be reduced to a single bug.
+The project does **not** assume that the historical battery-drain problem has a single cause.
 
-Instead, several independent or potentially interacting mechanisms exist.
+Instead, firmware comparison, runtime observation, packet capture, controlled patching, and long-term battery logging are used to separate individual mechanisms and determine their actual relevance.
 
 ---
 
-# Project Status
+# Current Status
 
 Research is ongoing.
 
-The following areas have currently been investigated:
+Several important firmware behaviors have now been identified and independently validated.
 
-- firmware 2.1.0
-- firmware 2.1.3
-- firmware 2.1.8
-- firmware 2.2.4
-- WLAN power-management states
-- DTIM / beacon skipping
-- real beacon-skip calculation
-- beacon-recovery behavior
-- WF200 communication
-- access-point selection and roaming behavior
-- WUP / EM2 sleep-resource handling
-- periodic mDNS restart behavior
-- runtime mDNS packet captures
-- isolated beacon-recovery patching
-- isolated periodic-mDNS patching
-- combined beacon-recovery + mDNS patching
-- hardware runtime validation
-- long-term battery logging
+The most important current findings are:
 
-Two experimental firmware modifications have now been implemented and tested:
+- periodic connected mDNS restart activity was introduced after firmware 2.1.0
+- firmware 2.2.4 contains an additional Beacon Recovery mechanism
+- the Beacon Recovery mechanism contains multiple measurement/control-validity problems
+- a qualifying Beacon Recovery result can become self-sustaining because historical control evidence is reused
+- the first recovery can also be triggered from an invalid measurement window
+- an additional signed-value interpretation problem exists in the recovery decision
+- Patch A experimentally suppresses Beacon Recovery
+- Patch B experimentally suppresses the periodic 2.2.4 mDNS restart
+- Patch A and Patch B can operate together on real hardware
+- long-term battery testing is ongoing
+- the current Patch C-C candidate has passed static pre-build qualification; experimental build and hardware qualification remain pending
 
-```text
-Patch A
-Beacon-recovery bypass
-
-Patch B
-Periodic mDNS restart bypass
-```
-
-Both modifications have also been combined into one experimental firmware image.
-
-Runtime testing has confirmed that:
-
-- Patch A suppresses the targeted beacon-recovery entry
-- normal beacon-skip calculation remains active with Patch A
-- Patch B suppresses the observed periodic mDNS restart traffic
-- Patch B alone does not suppress the beacon-recovery cycle
-- the combined A+B firmware boots and operates on real SHTRV-01 hardware
-- the combined firmware has not shown the targeted periodic mDNS cycle during
-  the monitored packet-capture window
-- the combined firmware has not shown the recurring beacon-recovery sequence
-  during the monitored multi-hour runtime period
-- normal Wi-Fi, cloud and thermostat functionality remained available during
-  the observed tests
-
-This does **not** yet prove that the historical battery-drain problem has been
-solved.
-
-Long-term battery testing remains in progress.
+The historical battery-drain problem is **not yet considered solved**.
 
 ---
 
 # Firmware Versions Investigated
 
-The following firmware versions are currently part of the comparison:
+| Firmware | Build | Role |
+|---|---|---|
+| 2.1.0 | `20211223-144805/v2.1.0@d30148ec` | older reference |
+| 2.1.3 | `20220202-080736/v2.1.3@d255ad74` | early comparison |
+| 2.1.8 | `20220811-152343/v2.1.8@5afc928c` | later comparison |
+| 2.2.4 | `20240619-130912/v2.2.4@ee290818` | primary research target |
 
-| Firmware | Build |
-|---|---|
-| 2.1.0 | `20211223-144805/v2.1.0@d30148ec` |
-| 2.1.3 | `20220202-080736/v2.1.3@d255ad74` |
-| 2.1.8 | `20220811-152343/v2.1.8@5afc928c` |
-| 2.2.4 | `20240619-130912/v2.2.4@ee290818` |
+The exact firmware version in which the historical battery-runtime degradation first appeared remains unknown.
 
-Firmware 2.1.6 and 2.1.7 are known intermediate releases but are not currently
-part of the primary four-version comparison.
+Battery drain was also observed in practical use after downgrading from 2.2.4 to 2.1.8.
 
----
+Therefore:
 
-# Historical Battery-Drain Observation
+> Firmware 2.2.4 cannot currently be considered the origin of the entire historical battery-drain problem.
 
-The exact firmware version in which the historical battery-runtime degradation
-first appeared is currently unknown.
-
-The available user history is approximately:
-
-```text
-older firmware
-     ↓
-large firmware update
-     ↓
-2.2.4
-     ↓
-noticeably shorter battery runtime
-     ↓
-downgrade to 2.1.8
-     ↓
-battery drain still observed
-     ↓
-later downgrade to older firmware
-```
-
-This means that firmware 2.2.4 cannot currently be considered the origin of the
-entire battery-drain problem.
-
-Firmware 2.1.8 had already shown relatively fast battery drain in practical
-use.
-
-Firmware 2.1.3 must also **not** currently be classified as a known
-battery-efficient release.
-
-The historical introduction boundary therefore remains unresolved.
-
-Firmware 2.1.0 is currently being used as an older reference firmware because
-its observed behavior differs significantly from later versions in several
-areas.
+Firmware 2.1.0 is used as an older reference because several WLAN-related behaviors differ significantly from later firmware.
 
 ---
 
-# WLAN Power Management
+# Research Method
 
-The TRV uses several internal WLAN power-management states.
+The investigation combines:
 
-The currently identified application-visible states include:
+- native ARM Thumb firmware analysis
+- cross-version firmware comparison
+- control-flow reconstruction
+- WF200 host-interface analysis
+- runtime debug logging
+- passive network capture
+- controlled firmware modifications
+- isolated A/B testing
+- long-term battery logging
+- battery-voltage comparison
+- runtime and reboot tracking
+- RSSI monitoring
+- Beacon Recovery statistics
+- valve/motor activity analysis
 
-```text
-state 1
-state 2
-state 3
-state 4
-state 5
-```
+Decompiler output is treated as supporting information.
 
-The normal connected power-save state is generally state 3.
-
-In this state the firmware configures the WF200 for Fast Power Save with a
-desired beacon-skip value derived from RSSI.
-
-Observed RSSI mapping:
-
-```text
-RSSI >= -69 dBm       desired skip = 20
-RSSI -70 .. -79 dBm   desired skip = 15
-RSSI < -79 dBm        desired skip = 10
-```
-
-These values describe the requested power-save behavior.
-
-They do not by themselves prove the actual electrical consumption of the radio.
+Where possible, important findings are verified against native instructions, control flow, runtime behavior, or independent measurements.
 
 ---
 
-# Beacon Skip
+# Evidence Classification
 
-Firmware 2.2.4 exposes additional beacon statistics and calculates a value
-referred to here as:
+The project uses four evidence levels.
 
-```text
-real_beacon_skip
-```
+### PROVEN
 
-Static analysis showed that the firmware obtains cumulative beacon statistics
-from the WF200 and calculates approximately:
+Directly established from native firmware behavior, deterministic static analysis, validated binary changes, or sufficiently direct runtime evidence.
 
-```text
-600 / delta(beacon_rx_count)
-```
+### STRONGLY SUPPORTED
 
-The result is truncated to the low byte and subsequently interpreted as a
-signed value.
+Multiple independent findings support the conclusion, but some implementation detail or environmental dependency remains unresolved.
 
-This creates several edge cases.
+### INFERENCE
 
-The relevant statistics are available through firmware functionality associated
-with the WF200 statistics command and are exposed through `/stats` on firmware
-2.2.4.
+A technically plausible interpretation consistent with the available evidence, but not directly established.
 
-Observed fields include values associated with:
+### UNKNOWN
 
-```text
-beacon_rx_count
-beacon_missed_count
-tbtt_diff
-real_beacon_skip
-desired_beacon_skip
-```
+The available evidence is insufficient to determine the behavior or intent.
 
-The exact lower-level semantics of all WF200 counters are not fully known.
-
-However, the relationship between the cumulative beacon receive counter and the
-calculated `real_beacon_skip` value has been established sufficiently to explain
-the host-side calculation.
-
-Firmware 2.2.4 then evaluates the calculated value and may enter a recovery path
-when the result falls into the qualifying range.
+These classifications are intentionally used to distinguish firmware facts from interpretation.
 
 ---
 
-# Beacon-Skip Recovery
-
-The characteristic runtime log message is:
-
-```text
-minutes_tick: Beacon skip error! Attempt recovery
-```
-
-When triggered, the firmware temporarily changes the WLAN power-management
-state.
-
-The observed sequence is approximately:
-
-```text
-normal power save
-     ↓
-beacon-skip recovery
-     ↓
-state 1
-     ↓
-approximately 5 seconds
-     ↓
-restore previous / desired state
-     ↓
-normally state 3
-```
-
-Reverse engineering indicates that state 1 places the WLAN subsystem into an
-active / always-on configuration and prevents the host from entering its deeper
-sleep state while the recovery is active.
-
-No explicit transmit-power increase was identified.
-
-No evidence was found that the normal recovery mechanism intentionally performs
-a complete Wi-Fi reconnect, DHCP renewal or cloud reconnect.
-
-The additional activity makes an energy impact technically plausible, but its
-electrical cost has not been measured.
-
----
-
-# Beacon-Recovery Runtime Behavior
-
-On stock firmware 2.2.4, the recovery behavior has repeatedly been observed at
-approximately one event per minute under affected conditions.
-
-Long-term logger data provide an additional useful indicator.
-
-On the stock 2.2.4 reference device, the beacon-recovery counter was observed
-increasing by approximately:
-
-```text
-+30 events per 30 minutes
-```
-
-which corresponds closely to:
-
-```text
-1 recovery event per minute
-```
-
-The same recurring behavior was also observed on the mDNS-only patched device.
-
-Importantly, recovery events have been observed while:
-
-- RSSI was approximately `-58` to `-60 dBm`
-- desired beacon skip was 20
-- the valve motor was inactive
-
-Poor RSSI and valve movement are therefore not necessary conditions for the
-observed recurring recovery behavior.
-
----
-
-# Patch A – Beacon-Recovery Bypass
-
-An experimental patch for firmware 2.2.4 was developed.
-
-The patch changes only the control flow entering the beacon-recovery block.
-
-Original instruction:
-
-```text
-31 DC
-```
-
-Patched instruction:
-
-```text
-31 E0
-```
-
-Program-image instruction address:
-
-```text
-0x0001E1C8
-```
-
-Changed byte in the extracted program:
-
-```text
-0x0001E1C9
-
-DC -> E0
-```
-
-Corresponding GBL location:
-
-```text
-0x0002471D
-
-DC -> E0
-```
-
-The modification bypasses the recovery entry while leaving the surrounding
-beacon-statistics calculation intact.
-
-The patch does **not** intentionally modify:
-
-- RSSI thresholds
-- desired beacon-skip values
-- real beacon-skip calculation
-- Wi-Fi transmit power
-- cloud communication
-- access-point selection
-- normal Fast Power Save configuration
-
-Runtime testing has confirmed that patched devices continue calculating beacon
-statistics while the targeted recovery counter remains inactive.
-
-Normal device functionality has also remained available during testing.
-
-This proves that the targeted recovery mechanism can be bypassed.
-
-It does **not** prove that bypassing it solves the historical battery-drain
-problem.
-
----
-
-# Periodic mDNS Activity
-
-Static firmware comparison identified another recurring network mechanism that
-differs between firmware generations.
+# Key Finding 1 – Periodic mDNS Restart
 
 The mDNS responder itself already exists in firmware 2.1.0.
 
-The important change in firmware 2.1.3 is the addition of a recurring connected
-maintenance caller that invokes the equivalent of:
+The important later change is the addition of recurring connected maintenance that restarts the mDNS probing process.
 
-```text
-mdns_resp_restart()
-```
+Runtime packet capture confirmed the resulting periodic traffic.
 
-The resulting path is approximately:
+Observed behavior:
 
-```text
-connected maintenance
-       ↓
-mdns_resp_restart()
-       ↓
-reset probing state
-       ↓
-schedule probe callback
-       ↓
-mDNS probes
-       ↓
-mDNS announcement
-```
+| Firmware | Runtime observation |
+|---|---|
+| 2.1.0 | no comparable periodic burst observed during the monitored ~13-minute window |
+| 2.1.3 | approximately one burst every 60 seconds |
+| 2.2.4 | approximately one burst every 180 seconds |
 
-The restart resets the probing state and schedules the mDNS probing sequence
-again.
-
-After successful probing, the device sends an mDNS announcement.
-
-This means the relevant firmware difference is **not the introduction of mDNS
-itself**.
-
-The difference is the introduction of the recurring restart of the mDNS probing
-process.
-
----
-
-# mDNS Runtime Validation
-
-Passive packet captures performed on real Shelly TRV Gen1 devices confirmed the
-behavior.
-
-Three firmware configurations were initially observed simultaneously:
-
-| Device | Firmware | Role |
-|---|---|---|
-| `.11` | 2.1.0 | old firmware reference |
-| `.77` | 2.1.3 | periodic-mDNS reference |
-| `.229` | 2.2.4 stock | current stock reference |
-
-The capture was performed using TShark with UDP port 5353 filtered for the
-observed devices.
-
-The initial simultaneous observation period was approximately 13 minutes.
-
----
-
-## Firmware 2.1.0
-
-No mDNS packets from the 2.1.0 reference device were observed during the
-approximately 13-minute simultaneous capture.
-
-This is consistent with the static analysis, which found the mDNS responder in
-2.1.0 but did not find the later connected-maintenance caller responsible for
-periodically restarting the probing process.
-
-This result must not be interpreted as:
-
-```text
-2.1.0 never uses mDNS
-```
-
-The correct interpretation is:
-
-```text
-No comparable recurring mDNS probe / announcement cycle was observed during
-this test window.
-```
-
----
-
-## Firmware 2.1.3
-
-Firmware 2.1.3 repeatedly produced a characteristic mDNS sequence.
-
-A complete observed cycle normally consisted of:
+A typical burst contains:
 
 ```text
 probe
@@ -448,1284 +131,838 @@ probe
 announcement
 ```
 
-Example:
+In firmware 2.2.4, the approximately 180-second interval is not implemented as a dedicated 180-second timer.
 
-```text
-59.699 s   probe
-60.006 s   probe
-60.211 s   probe
-60.520 s   announcement
-```
+The relevant connected maintenance path is serviced on a minute basis and the mDNS restart is reached every third applicable invocation.
 
-Further burst starts occurred at approximately:
+### Interpretation
 
-```text
-0 s
-59.7 s
-119.8 s
-179.8 s
-239.6 s
-299.7 s
-359.6 s
-419.7 s
-480.2 s
-539.8 s
-599.6 s
-659.8 s
-719.8 s
-779.9 s
-```
+**PROVEN:** The recurring mDNS restart creates additional periodic firmware and network activity.
 
-The observed period is therefore approximately:
+**UNKNOWN:** Its quantitative contribution to battery drain.
 
-```text
-60 seconds
-```
-
-This runtime behavior closely matches the mechanism identified during static
-analysis.
-
-The periodic mDNS restart in firmware 2.1.3 is therefore no longer only a
-static-analysis hypothesis.
-
-It has been confirmed on a running device.
-
----
-
-## Firmware 2.2.4 Stock
-
-Stock firmware 2.2.4 also produced the characteristic mDNS
-probe / announcement sequence.
-
-Observed burst start times included:
-
-```text
-117.555 s
-297.779 s
-477.492 s
-657.413 s
-```
-
-The intervals were:
-
-```text
-180.225 s
-179.713 s
-179.921 s
-```
-
-The observed runtime period is therefore approximately:
-
-```text
-180 seconds
-```
-
-This establishes that the periodic mDNS behavior is still present in firmware
-2.2.4.
-
-However, the period differs significantly from firmware 2.1.3.
-
-Current runtime comparison:
-
-```text
-2.1.0        no periodic burst observed during ~13 min
-2.1.3        periodic burst ≈ 60 s
-2.2.4 stock  periodic burst ≈ 180 s
-```
-
-Static analysis of 2.2.4 showed that this approximately 180-second behavior is
-not implemented as a dedicated 180-second timer.
-
-Instead, a minute-based maintenance path increments an internal counter and
-services the mDNS restart every third invocation when the required connected /
-IPv4 conditions are met.
-
-This produces the observed approximately 180-second interval.
+No direct electrical energy measurement per mDNS cycle has yet been performed.
 
 ---
 
 # Patch B – Periodic mDNS Restart Bypass
 
-After identifying the periodic 2.2.4 mDNS restart path, a second isolated patch
-was developed.
+Patch B is an experimental firmware modification that bypasses the recurring 2.2.4 mDNS restart call.
 
-The target is the conditional branch immediately before the periodic
-`mdns_resp_restart()` call.
+It does **not** remove mDNS itself.
 
-Original instruction:
+Other event-driven mDNS functionality remains present.
 
-```text
-02 D0
-```
-
-Patched instruction:
+The modification is therefore described as:
 
 ```text
-02 E0
+Periodic mDNS restart bypass
 ```
 
-Program-image instruction address:
-
-```text
-0x0001E0F0
-```
-
-Changed byte in the extracted program:
-
-```text
-0x0001E0F1
-
-D0 -> E0
-```
-
-Corresponding GBL location:
-
-```text
-0x00024645
-
-D0 -> E0
-```
-
-The patch changes the branch so execution always skips the periodic restart
-call and continues at the firmware's existing continuation path.
-
-The periodic caller is bypassed.
-
-The patch does **not** remove the mDNS implementation itself.
-
-Other mDNS entry points remain present, including paths associated with:
-
-- network-interface setup
-- service registration
-- connection establishment
-- other event-driven responder behavior
-
-Patch B should therefore be described as:
-
-```text
-periodic mDNS restart bypass
-```
-
-and not as:
+and not:
 
 ```text
 mDNS disabled
 ```
 
----
+Runtime packet capture on the isolated Patch-B test device confirmed that the targeted periodic mDNS traffic disappeared during the monitored test window.
 
-# Isolated Patch-B Runtime Test
+Normal connectivity remained available.
 
-Patch B was installed by itself on the `.77` test device.
+Importantly, Beacon Recovery continued to occur.
 
-The beacon-recovery patch was intentionally **not** included.
+This provides strong evidence that:
 
-This created an important controlled test:
+> The periodic mDNS restart is not required for the observed recurring Beacon Recovery behavior under the tested conditions.
 
-```text
-Patch B / periodic mDNS bypass    YES
-Patch A / beacon recovery         NO
-```
-
-A TShark capture filtered for UDP port 5353 and the test device was then
-performed.
-
-During the monitored test window of at least approximately 10 minutes:
-
-```text
-0 periodic mDNS packets captured
-```
-
-This provides strong finite-window runtime evidence that Patch B suppresses the
-targeted periodic mDNS restart behavior.
-
-It does not prove that the device can never emit mDNS traffic because
-event-driven mDNS paths remain intact.
-
-Normal device connectivity remained available.
+This does not prove that the mechanisms can never interact under other conditions.
 
 ---
 
-# Patch B vs. Beacon Recovery
+# Key Finding 2 – Beacon Recovery
 
-The isolated Patch-B experiment also answered an important question.
+Firmware 2.2.4 contains an additional WLAN Beacon Recovery mechanism.
 
-Despite suppression of the periodic mDNS restart, the `.77` device continued
-to produce:
+The characteristic runtime message is:
 
 ```text
-Beacon skip error! Attempt recovery
+minutes_tick: Beacon skip error! Attempt recovery
 ```
 
-at approximately one event per minute.
-
-This continued even with good observed WLAN conditions around:
+When triggered, the firmware approximately performs:
 
 ```text
-RSSI ≈ -58 .. -59 dBm
-desired beacon skip = 20
-```
-
-The recovery sequence continued to include:
-
-```text
-state 1
-     ↓
+normal Fast Power Save
+        ↓
+Beacon Recovery
+        ↓
+PM state 1 / active WLAN
+        ↓
 approximately 5 seconds
-     ↓
-state 3 / desired skip
+        ↓
+restore normal PM policy
+        ↓
+normally state 3 / Fast Power Save
 ```
 
-This provides strong evidence that, under the tested conditions:
+State 1 places the WF200 into an active configuration and temporarily prevents the normal deeper host sleep behavior associated with the connected power-save state.
 
-> The periodic mDNS restart is not required for the recurring beacon-recovery
-> behavior to occur.
+No evidence was found that the normal recovery sequence intentionally performs a complete Wi-Fi reconnect, DHCP renewal, or cloud reconnect.
 
-This is more precise than claiming that the two mechanisms are universally or
-completely independent.
+No explicit transmit-power increase was identified.
 
-Other indirect interactions under different conditions have not been ruled out.
+On affected stock 2.2.4 devices, the recovery has been observed approximately once per minute for extended periods.
+
+The behavior has also occurred with good RSSI, for example around `-58` to `-60 dBm`.
+
+Poor RSSI is therefore not a necessary condition for the observed recurring recovery loop.
 
 ---
 
-# mDNS Energy Relevance
+# Beacon Measurement
 
-The periodic mDNS mechanism generates additional recurring firmware and network
-activity.
+Firmware 2.2.4 periodically requests WF200 statistics.
 
-Each complete observed sequence can include approximately:
+The relevant host-side measurement uses a cumulative received-beacon counter.
+
+For a previous value `P` and current value `C`, the firmware derives:
 
 ```text
-3 mDNS probes
-+
-1 mDNS announcement
+delta = C - P
 ```
 
-This requires processing and packet transmission that would not occur at that
-moment if the periodic restart were absent.
+and approximately calculates:
 
-Therefore the additional mechanism represents a real additional workload.
+```text
+real_beacon_skip = 600 / delta
+```
 
-However, no direct electrical current measurement has been performed.
+The result is stored in an 8-bit field.
 
-The current evidence cannot quantify:
+The value is also exposed diagnostically through firmware statistics.
 
-- current consumed per mDNS cycle
-- battery capacity consumed per cycle
-- battery capacity consumed per day
-- resulting battery-runtime reduction
-- the percentage of the historical battery drain attributable to mDNS
+The same stored value is later used by the Beacon Recovery control logic.
 
-The correct interpretation is therefore:
-
-> Periodic mDNS restart activity is a confirmed additional recurring workload
-> and a technically plausible battery-drain contributor, but its quantitative
-> contribution to battery drain is currently unknown.
+This creates several important validity problems.
 
 ---
 
-# Combined Patch A+B
+# C1a – Signed Beacon-Skip Interpretation
 
-After the isolated experiments, Patch A and Patch B were combined.
+The calculated quotient is stored as one byte.
 
-The combined firmware contains:
+The recovery decision in stock firmware 2.2.4 subsequently reads that byte as a **signed** value.
+
+This creates unexpected qualifying values.
+
+Examples:
 
 ```text
-Patch A
-Beacon-recovery bypass
+delta = 3
 
-0x0001E1C9
-DC -> E0
+600 / 3 = 200
+
+8-bit value:
+0xC8
+
+signed interpretation:
+-56
 ```
 
 and:
 
 ```text
-Patch B
-Periodic mDNS restart bypass
+delta = 4
 
-0x0001E0F1
-D0 -> E0
+600 / 4 = 150
+
+8-bit value:
+0x96
+
+signed interpretation:
+-106
 ```
 
-No additional firmware-code modifications are intentionally introduced by the
-combined patch.
+Because the recovery predicate accepts values less than or equal to `2` after rejecting zero, these negative interpretations can incorrectly satisfy the recovery condition.
 
-For the specifically supported original firmware image, the validated combined
-output has:
+The fresh-trigger set under the stock signed-byte behavior is therefore:
 
 ```text
-Size:
-1,106,384 bytes
-
-SHA-256:
-7adbb31d6b7faa8b9290d7b3436af45d42af9c3602a7195cafab774ded84ac61
-
-CRC32:
-0xBAEB8265
+delta = 3
+delta = 4
+delta = 201 .. 600
 ```
 
-The patched main program SHA-256 is:
+Under the intended non-negative quotient interpretation, only the range producing actual values `1` or `2` should satisfy that comparison.
 
-```text
-06742a2632a3d45cf697b8be85045914d004f30644dad17b3d0d20012c87c61b
-```
+### Classification
 
-A complete original-vs-patched GBL comparison produces exactly six changed
-bytes:
+**PROVEN:** The signed byte interpretation changes the control decision for valid positive quotient values such as 150 and 200.
 
-```text
-Firmware modifications:
+**STRONGLY SUPPORTED:** This represents a control/measurement-validity defect rather than an intentional negative error-code mechanism.
 
-0x00024645: D0 -> E0
-0x0002471D: DC -> E0
-
-Updated GBL CRC32:
-
-0x0010E1CC: 58 -> 65
-0x0010E1CD: AB -> 82
-0x0010E1CE: 7B -> EB
-0x0010E1CF: DC -> BA
-```
-
-The first two changes are the two intentional firmware modifications.
-
-The remaining four bytes are the recalculated GBL CRC32.
+No independent negative sentinel or error semantics have been identified for this field.
 
 ---
 
-# Combined Patch Runtime Validation
+# C1b – Measurement-Window Validity
 
-The combined A+B firmware was installed on the `.226` test device.
-
-Before installation, this device was running firmware 2.1.3.
-
-After OTA installation it booted normally as:
+The firmware uses the fixed numerator:
 
 ```text
-20240619-130912/v2.2.4@ee290818
+600
 ```
 
-The firmware version string remains the normal 2.2.4 identifier because the
-patch does not modify version metadata.
+but the Beacon Recovery calculation does not contain a corresponding elapsed-time normalization for the stored baseline `P`.
 
-The device successfully retained normal observed functionality including:
+This matters because the previous cumulative counter can survive situations in which one or more expected measurement opportunities are skipped.
 
-- firmware boot
-- WLAN operation
-- local HTTP access
-- thermostat operation
-- valve operation
-- cloud connectivity after startup
-
-A TShark test of the combined firmware did not observe the targeted recurring
-mDNS traffic during the monitored capture window.
-
-A subsequent multi-hour debug-log observation also did not show the recurring:
+Conceptually:
 
 ```text
-Beacon skip error! Attempt recovery
+baseline P
+    ↓
+measurement opportunity skipped
+    ↓
+P survives
+    ↓
+another opportunity skipped
+    ↓
+P still survives
+    ↓
+later current value C
+    ↓
+600 / (C - P)
 ```
 
-sequence.
+The resulting `delta` can therefore represent a longer interval than the calculation assumes.
 
-During this period:
+Several WLAN power-management and maintenance paths can affect whether a normal measurement opportunity is available.
 
-- RSSI remained in a normal range
-- desired beacon skip remained functional
-- state 3 remained active during normal connected operation
-- no recurring transition to state 1 was observed
-- no unexpected reboot was identified in the examined runtime log
+### Why this matters
 
-This provides hardware runtime evidence that both targeted modifications can
-operate together.
+A sufficiently aged baseline can produce a quotient of `1` or `2` even when the underlying beacon reception does not represent the failure condition that the calculation appears intended to detect.
 
-It does **not** yet establish long-term battery improvement.
+### Classification
+
+**PROVEN:** The fixed-600 calculation contains no corresponding elapsed-time normalization.
+
+**PROVEN:** Identified firmware paths can preserve the previous baseline while measurement opportunities are skipped.
+
+**STRONGLY SUPPORTED:** This creates a genuine measurement-validity problem.
+
+**UNKNOWN:** Whether this is the mechanism responsible for the first Beacon Recovery event observed on the current physical test devices.
+
+Capturing the exact first trigger remains an important runtime objective.
 
 ---
 
-# Firmware 2.1.0 → 2.1.3 Changes
+# C2 – Self-Sustaining Beacon Recovery
 
-The focused firmware comparison found several relevant differences.
+The most important Beacon Recovery control-flow finding concerns what happens **after a qualifying recovery event**.
 
-Importantly, firmware 2.1.0 and 2.1.3 use the same protected WF200 firmware
-payload and the same FMAC generation.
+Two values are relevant:
 
-The normal state-3 WLAN power-save configuration is also substantially
-equivalent.
+```text
+P = previous cumulative beacon receive counter
 
-Relevant differences include:
+R = cached real_beacon_skip
+```
+
+During a qualifying recovery, stock firmware clears `P`.
+
+However, the qualifying `R` value is retained.
+
+The next successful measurement therefore begins with:
+
+```text
+P = 0
+R = previous qualifying value
+```
+
+Because `P` is zero, the firmware cannot calculate a fresh delta.
+
+It instead installs the current cumulative counter as the new baseline.
+
+However, stock control flow then continues to evaluate the **old cached R value**.
+
+The sequence becomes:
+
+```text
+fresh qualifying R
+        ↓
+Beacon Recovery
+        ↓
+P = 0
+R retained
+        ↓
+next successful statistics sample
+        ↓
+P was zero
+        ↓
+current counter becomes new P
+        ↓
+no fresh R was calculated
+        ↓
+old qualifying R is evaluated anyway
+        ↓
+Beacon Recovery again
+        ↓
+P = 0
+        ↓
+repeat
+```
+
+This prevents the newly installed baseline from surviving long enough to obtain the next fresh measurement.
+
+### Important consequence
+
+Once the system enters this state, a new beacon anomaly is **not required for every subsequent recovery**.
+
+The historical qualifying value can repeatedly trigger the recovery path.
+
+### Classification
+
+**PROVEN:** This self-sustaining state exists in the identified stock 2.2.4 control flow.
+
+**PROVEN:** Normal successful post-recovery statistics acquisition does not by itself break the loop.
+
+**PROVEN:** The normal PM restoration does not clear the cached qualifying value.
+
+**UNKNOWN:** Whether preserving the value was originally intended as diagnostic history.
+
+The value is exposed through `/stats`, so retaining the last calculated result has a plausible diagnostic purpose.
+
+The problem is therefore better described as a failure to distinguish:
+
+```text
+historical diagnostic value
+```
+
+from:
+
+```text
+fresh control evidence
+```
+
+rather than simply assuming that retaining the value itself was accidental.
+
+---
+
+# Combined Beacon-Recovery Failure Model
+
+The current firmware analysis supports the following possible sequence:
+
+```text
+measurement window becomes invalid
+        ↓
+aged or otherwise invalid baseline
+        ↓
+qualifying real_beacon_skip result
+        ↓
+first Beacon Recovery
+        ↓
+P cleared
+R retained
+        ↓
+historical R reused as fresh control evidence
+        ↓
+recovery approximately every minute
+        ↓
+self-sustaining recovery cycle
+```
+
+The first-trigger validity problems and the post-recovery loop are separate defects.
+
+A false first trigger is therefore not required for the post-recovery problem to exist.
+
+Likewise, correcting only the first-trigger calculation would not correct the stale-control-evidence loop after a genuinely qualifying recovery.
+
+The exact cause of the first recovery event on the currently affected physical devices remains under investigation.
+
+---
+
+# Patch A – Beacon-Recovery Bypass
+
+Patch A was developed before the complete Beacon Recovery control flow was understood.
+
+It changes the branch entering the recovery block while leaving the surrounding beacon-statistics calculation active.
+
+Runtime testing confirmed:
+
+- Beacon Recovery is suppressed
+- beacon statistics continue to update
+- normal Wi-Fi remains available
+- cloud connectivity remains available
+- thermostat operation remains available
+
+Patch A has therefore been extremely useful as an **experimental isolation tool**.
+
+However, the later reverse engineering changed its interpretation.
+
+Beacon Recovery itself has a legitimate reliability purpose: a fresh and genuinely abnormal beacon measurement can justify reconfiguring the WF200 power-management state.
+
+Patch A suppresses that recovery entirely.
+
+Therefore:
+
+> Patch A should not currently be considered the preferred final correction for the Beacon Recovery defect.
+
+It remains valuable for controlled A/B testing and for measuring the cost of the recovery workload.
+
+---
+
+# Patch C – Corrective Beacon-Recovery Research
+
+The current Patch C research aims to correct the identified Beacon Recovery validity problems **without removing legitimate recovery behavior**.
+
+The behavioral requirements are:
+
+1. preserve diagnostic Beacon Recovery statistics
+2. prevent signed-byte interpretation from creating false qualifying control values
+3. prevent invalid measurement windows from being treated as nominal samples
+4. prevent historical `real_beacon_skip` values from acting as fresh control evidence
+5. allow a new baseline to survive long enough to obtain a fresh measurement
+6. preserve legitimate recovery when a new valid measurement genuinely qualifies
+7. preserve unrelated WLAN power-management behavior
+8. preserve normal connectivity and thermostat operation
+
+Conceptually:
+
+```text
+invalid measurement window
+        ↓
+re-establish baseline
+        ↓
+wait for fresh comparable measurement
+        ↓
+calculate fresh result
+        ↓
+healthy result ───────────→ continue normally
+        │
+        └── genuine fault → Beacon Recovery
+```
+
+The current Patch C-C candidate has completed static pre-build qualification.
+
+No known static blocker was identified in the bounded independent review. The modified instruction ranges, control flow, helper code, interrupt-mask handling, baseline invalidation logic, and preservation of legitimate fresh Beacon Recovery were independently checked.
+
+This result justifies the next research phase: creation and independent verification of an experimental firmware build for controlled hardware A/B testing.
+
+It does **not** establish runtime correctness, battery-life improvement, or a production-ready fix. Physical sample timing, external PM transaction behavior, IRQ latency, bootloader/OTA acceptance, and long-term measurement availability under policy or connection churn still require hardware qualification.
+
+Patch C-C therefore remains an experimental research candidate and is not a released or hardware-qualified patch.
+
+---
+
+# WUP / EM2 Sleep-Resource Handling
+
+A separate low-level WLAN power-management path remains under investigation.
+
+The normal sleep transition approximately performs:
+
+```text
+acquire WLAN wake resource
+        ↓
+configure WF200 power mode
+        ↓
+final device-sleep operation
+        ↓
+release wake / EM2 blocking resource
+```
+
+If the final low-level sleep operation fails, the release path may not be reached.
+
+This can leave a WLAN-owned wake / EM2-blocking resource retained.
+
+However:
+
+- the fundamental path already exists in firmware 2.1.0
+- the resource is reference-counted
+- later firmware may reach or prolong the condition differently
+- its frequency in real operation has not been established
+
+Therefore it cannot currently explain the historical battery-runtime boundary by itself.
+
+No patch is currently justified that blindly releases this resource.
+
+WUP / EM2 handling remains a **separate research topic** and is not the current Patch C.
+
+---
+
+# Desired Beacon Skip
+
+During normal connected operation, firmware 2.2.4 configures WF200 Fast Power Save with a desired beacon-skip value derived from RSSI.
+
+Observed mapping:
+
+```text
+RSSI >= -69 dBm       desired skip = 20
+
+RSSI -70 .. -79 dBm   desired skip = 15
+
+RSSI < -79 dBm        desired skip = 10
+```
+
+These are requested power-save parameters.
+
+They should not be confused with the calculated diagnostic `real_beacon_skip`.
+
+The current Beacon Recovery logic also does not simply compare:
+
+```text
+real_beacon_skip
+```
+
+against:
+
+```text
+desired_beacon_skip
+```
+
+Poor RSSI alone therefore does not explain the observed recurring recovery cycle.
+
+---
+
+# Firmware Evolution
+
+The cross-version comparison shows that WLAN behavior evolved substantially across the investigated firmware generations.
+
+## 2.1.0 → 2.1.3
+
+Relevant changes include:
 
 ```text
 2.1.0
   ↓
 2.1.3
   ├─ periodic connected mDNS restart
-  ├─ new state-5 / psovrd2 mechanism
+  ├─ state-5 / psovrd2 mechanism
   ├─ named active power-save override
-  ├─ wake ACK wait change
-  └─ event dissemination changes
+  ├─ wake ACK timing change
+  └─ event-handling changes
 ```
 
-Among these changes, the periodic mDNS restart is currently the strongest
-confirmed new recurring mechanism during ordinary connected operation.
+The periodic mDNS restart is the strongest confirmed new recurring connected workload identified in this transition.
 
-Runtime packet capture has independently confirmed this behavior.
+## 2.1.3 → 2.1.8
 
-This does not establish that the mDNS change caused the historical battery
-degradation.
+Relevant changes include:
 
----
+- additional post-association PM sequencing
+- updated FMAC generation
+- updated protected WF200 firmware
+- additional network behavior changes
 
-# State 5 / psovrd2
+No single new unconditional host-side sleep-lock leak was identified.
 
-Firmware 2.1.3 introduced an externally triggered temporary WLAN
-power-management state referred to as state 5.
+## 2.1.8 → 2.2.4
 
-Known entry points include:
+Firmware 2.2.4 adds or expands:
 
-```text
-/psovrd2
-```
-
-and the corresponding cloud command.
-
-The mechanism requests approximately:
-
-```text
-Fast Power Save
-desired skip = 10
-```
-
-for a temporary period.
-
-The countdown is initialized to:
-
-```text
-180
-```
-
-and is serviced by firmware maintenance logic.
-
-This should not be interpreted as the device intentionally remaining fully
-awake for three minutes.
-
-Successful completion of the WLAN sleep transition releases the corresponding
-wake / sleep resources.
-
-No autonomous periodic caller continuously entering state 5 has been identified.
-
-However, repeated external requests can refresh the countdown.
-
-State 5 therefore remains a conditional and externally driven mechanism rather
-than the strongest candidate for normal idle battery drain.
-
----
-
-# WUP / EM2 Sleep-Resource Handling
-
-Reverse engineering identified a conditional low-level failure path in the WLAN
-power-management implementation.
-
-The normal sleep transition approximately performs:
-
-```text
-acquire WLAN wake resource
-       ↓
-configure WF200 power mode
-       ↓
-final device-sleep operation
-       ↓
-release wake / EM2 blocking resource
-```
-
-If the final low-level device-sleep control-register operation fails, the
-release step may not be reached.
-
-This can leave a WLAN-owned wake / EM2-blocking resource retained.
-
-However, this mechanism requires careful interpretation.
-
-The same fundamental failure path is already present in firmware 2.1.0.
-
-Therefore:
-
-```text
-WUP / EM2 retention bug
-```
-
-cannot by itself explain a battery-runtime boundary between 2.1.0 and 2.1.3.
-
-Later firmware may theoretically reach or prolong this condition differently,
-but this has not yet been demonstrated.
-
-The resource is reference-counted.
-
-A future patch must therefore **not** simply release the resource blindly.
-
-Any modification must first establish ownership and safe cleanup semantics.
-
----
-
-# Firmware 2.1.3 → 2.1.8
-
-The comparison between firmware 2.1.3 and 2.1.8 found additional WLAN changes.
-
-The most visible host-side change is an additional post-association
-power-management sequence.
-
-The sequence approximately performs:
-
-```text
-restore state 4
-     ↓
-delay
-     ↓
-enter state 3
-```
-
-This is not equivalent to an unconditional persistent awake state.
-
-Depending on the previous state, restoring state 4 may actually terminate a
-temporary power-management hold sooner.
-
-No new unconditional host-side sleep-lock leak was identified in 2.1.8.
-
-The protected WF200 firmware image also changed between 2.1.3 and 2.1.8.
-
-Because the internal behavior of that protected image cannot currently be
-inspected directly, it remains an important uncertainty.
-
-Firmware 2.1.8 also introduced MQTT failure backoff behavior, which could reduce
-network activity under some failure conditions.
-
-Static analysis therefore has not identified one simple new host-side mechanism
-that explains the historically observed battery drain on 2.1.8.
-
----
-
-# Firmware 2.2.4
-
-Firmware 2.2.4 adds several additional mechanisms relevant to this research.
-
-These include:
-
-- expanded WF200 statistics
+- WF200 statistics
 - beacon receive counters
-- calculated `real_beacon_skip`
-- beacon-skip recovery
-- additional power-management retry / locking behavior
-- a newer protected WF200 firmware image
+- `real_beacon_skip`
+- Beacon Recovery
+- PM retry/locking behavior
+- newer FMAC/WF200 components
 
-The periodic mDNS behavior introduced in earlier firmware is also still present,
-although runtime testing shows an approximately 180-second interval rather than
-the approximately 60-second interval observed on firmware 2.1.3.
-
-Firmware 2.2.4 therefore contains at least two independently observable
-recurring mechanisms of interest:
-
-```text
-periodic mDNS restart
-+
-beacon-skip recovery under qualifying conditions
-```
-
-The isolated Patch-B experiment demonstrates that suppressing the periodic mDNS
-restart does not suppress the recurring beacon-recovery behavior under the
-tested conditions.
-
-This substantially narrows the possible relationship between the two
-mechanisms.
-
-It does not prove that no interaction can occur under any condition.
+The Beacon Recovery mechanism investigated in this repository is specific to the later 2.2.4 control flow and therefore cannot explain all battery drain historically observed on 2.1.8.
 
 ---
 
-# Access-Point Selection and Roaming
+# Experimental Patch Matrix
 
-Firmware analysis shows that the host sends the WF200 connection request using:
+| Configuration | Periodic mDNS | Beacon Recovery | Purpose |
+|---|---:|---:|---|
+| Stock 2.2.4 | active | active when qualifying | control |
+| Patch A | active | bypassed | isolate Beacon Recovery |
+| Patch B | bypassed | active | isolate periodic mDNS |
+| Patch A+B | bypassed | bypassed | combined workload experiment |
+| Patch C-C | preserved | corrected behavior intended | static pre-build qualification passed; hardware testing pending |
 
-```text
-BSSID   = FF:FF:FF:FF:FF:FF
-channel = 0
-```
+Patch A and Patch B are experimental research modifications.
 
-The host therefore does not explicitly select a particular access point from
-the scan results.
-
-Initial AP selection is left to the protected WF200 implementation.
-
-The connection configuration also contains:
-
-```text
-prevent_roaming = 1
-```
-
-This indicates that autonomous roaming is prevented once the connection has
-been established.
-
-No host-side background algorithm was identified that continuously searches for
-and switches to a stronger BSSID.
-
-This is relevant in multi-AP / Mesh environments because a device may remain
-associated with an access point that is not currently the strongest candidate.
-
-However, the exact AP-selection algorithm inside the protected WF200 firmware
-remains unknown.
+Patch C is not yet a hardware-qualified release.
 
 ---
 
-# RSSI Interpretation
+# Long-Term Battery Testing
 
-The `/status` RSSI value should not automatically be interpreted as proof that
-the host selected a specific BSSID.
+Long-term battery logging is being performed across multiple physical SHTRV-01 devices.
 
-The value is derived from cached connection information.
+The logger records approximately every 30 minutes.
 
-Scan results and the connected RSSI therefore describe different pieces of
-information.
-
-A scan showing a stronger neighboring BSSID does not by itself prove that the
-TRV is incorrectly associated.
-
-Direct BSSID observation is required for that conclusion.
-
-The newer runtime tests also establish an important additional point:
-
-```text
-good RSSI does not prevent the observed 2.2.4 beacon-recovery cycle
-```
-
-The mDNS-only patched `.77` device continued entering the recovery path around
-`-58` to `-59 dBm` with desired beacon skip 20.
-
-Stock 2.2.4 also showed the recovery cycle under similarly usable WLAN
-conditions.
-
-Poor signal quality alone therefore cannot explain the recurring recovery.
-
----
-
-# Current Scientific Interpretation
-
-The available evidence increasingly supports a **multi-mechanism model** rather
-than a single battery-drain bug.
-
-At least three mechanisms are currently relevant.
-
-## 1. Periodic mDNS restart
-
-The recurring mDNS restart is absent from the identified 2.1.0 connected-minute
-path and is present from firmware 2.1.3 onward.
-
-Runtime measurements currently show:
-
-```text
-2.1.0        no periodic burst observed during ~13 min
-2.1.3        one burst approximately every 60 s
-2.2.4 stock  one burst approximately every 180 s
-```
-
-This is a confirmed additional recurring workload.
-
-Patch B can suppress the targeted periodic 2.2.4 restart.
-
-Its electrical cost remains unknown.
-
-## 2. Beacon-skip recovery in firmware 2.2.4
-
-Under qualifying conditions, firmware 2.2.4 can repeatedly enter the
-beacon-recovery path.
-
-On affected test devices this has been observed approximately once per minute.
-
-The recovery temporarily changes the WLAN power-management state before
-returning to the normal power-save state.
-
-Patch A suppresses this specific recovery entry.
-
-Its contribution to total battery drain remains unquantified.
-
-Importantly, some patched devices have continued to show noticeable battery
-decline despite the recovery path being suppressed.
-
-The recovery mechanism should therefore not currently be treated as the sole
-cause of the historical battery-drain problem.
-
-## 3. Conditional WUP / EM2 retention failure
-
-A low-level failure path can leave a WLAN-owned wake / EM2-blocking resource
-retained if the final device-sleep operation fails.
-
-This path already exists in firmware 2.1.0.
-
-It therefore cannot independently establish the historical firmware boundary.
-
-It may still contribute to energy consumption if later firmware reaches the
-condition more frequently or retains it longer.
-
-That possibility has not yet been demonstrated.
-
----
-
-# Cumulative Model
-
-The historical battery-runtime reduction may therefore result from the
-accumulation of several effects rather than one catastrophic bug.
-
-A conceptual model is:
-
-```text
-normal TRV baseline workload
-       +
-periodic mDNS activity
-       +
-firmware-specific WLAN power-management behavior
-       +
-2.2.4 beacon recovery
-       +
-conditional sleep-resource retention
-       +
-normal motor activity
-       +
-cloud / controller communication
-       +
-radio conditions
-```
-
-This is currently a qualitative model.
-
-It must not be interpreted as a quantitative energy budget.
-
-The relative contribution of each component is unknown.
-
----
-
-# Battery Testing
-
-Long-term battery logging is being performed across multiple physical TRVs and
-firmware / patch configurations.
-
-Collected values currently include, where available:
+Collected values include, where available:
 
 - firmware version
 - battery percentage
 - battery voltage
 - uptime
 - RSSI
-- beacon statistics
 - desired beacon skip
 - real beacon skip
-- beacon-recovery counter
+- beacon receive statistics
+- Beacon Recovery counter
 
-Motor activity is also being extracted from runtime logs and is planned for
-direct inclusion in future logger/report output.
+Daily reports are generated for longer-term comparison.
 
-This is important because valve movement represents real mechanical work and
-must be separated from network- and firmware-related energy consumption when
-interpreting battery behavior.
+Battery voltage is treated as a stronger short-term indicator than the reported battery percentage, but neither represents a direct electrical energy measurement.
+
+Valve/motor activity must also be considered because motor movement represents real mechanical work and can materially affect battery behavior.
 
 ---
 
-# Current Long-Term Test Devices
+# Current Test Roles
 
-The current investigation has used several physical SHTRV-01 devices in
-different roles.
+The active research setup includes several physical TRVs with different firmware roles.
 
-The relevant experimental configurations have included:
+Important current configurations include:
 
-| Device | Configuration | Experimental role |
+| Device | Configuration | Role |
 |---|---|---|
-| `.11` | firmware 2.1.0 | older firmware reference |
-| `.77` | 2.2.4 + Patch B only | isolated mDNS-patch test |
-| `.88` | 2.2.4 + Patch A | beacon-recovery patch test |
-| `.228` | 2.2.4 + Patch A | beacon-recovery patch test |
-| `.226` | 2.2.4 + Patch A+B | combined-patch test |
+| `.77` | mDNS-only patched firmware; Beacon Recovery unchanged | isolated mDNS experiment |
+| `.226` | Beacon Recovery bypass + mDNS bypass | combined experimental patch |
 | `.229` | stock 2.2.4 | unmodified control/reference |
 
-These roles describe the relevant current or recent experimental configurations.
+Additional TRVs are used for comparison and experimental firmware testing.
 
-Devices have changed firmware during the investigation, so reports spanning a
-firmware transition must be divided at the transition point before interpreting
-battery behavior.
+Device roles can change during the investigation.
 
----
-
-# Current Battery Observations
-
-The current long-term dataset is not yet sufficient to establish a quantified
-battery-life improvement.
-
-However, several useful observations have already been made.
-
-## Stock 2.2.4 reference
-
-The stock `.229` device continues to show the recurring beacon-recovery
-behavior.
-
-Its recovery counter has repeatedly increased at approximately:
-
-```text
-30 events / 30 minutes
-```
-
-or approximately:
-
-```text
-1 event / minute
-```
-
-This provides a useful unmodified control for future comparison.
-
-## Patch-B-only device
-
-The `.77` device no longer showed the targeted periodic mDNS traffic during the
-monitored packet-capture window.
-
-However, its beacon-recovery counter continued increasing at approximately the
-same once-per-minute rate.
-
-Patch B alone therefore does not eliminate the observed beacon-recovery
-workload.
-
-## Patch-A devices
-
-Patch-A devices have shown:
-
-```text
-beacon-recovery counter = 0
-```
-
-while the underlying beacon statistics and `real_beacon_skip` calculation
-continue operating.
-
-This confirms the functional effect of Patch A.
-
-Battery behavior, however, has not been uniform across the Patch-A devices.
-
-At least one Patch-A device continued to show a noticeable voltage / reported
-battery decline despite the recovery counter remaining zero.
-
-This is important evidence against treating the beacon-recovery cycle as the
-only possible battery-drain mechanism.
-
-## Combined A+B device
-
-The `.226` device showed a comparatively stable initial battery-voltage period
-after installation of the combined patch.
-
-This is an encouraging observation.
-
-The observation period is currently too short, and the device crossed a
-firmware transition during the available report interval.
-
-It therefore cannot yet be treated as evidence that A+B has solved the battery
-drain.
+Any dataset crossing a firmware transition must therefore be divided at the transition before battery behavior is compared.
 
 ---
 
 # Battery-Data Interpretation
 
-Cross-device battery comparisons require caution.
+Cross-device battery comparison requires caution.
 
-The physical devices differ in:
+Physical devices can differ in:
 
 - battery age
 - battery condition
 - battery calibration
 - initial state of charge
+- temperature
 - valve load
 - motor workload
 - WLAN conditions
 - RSSI
-- network configuration
 - previous operating history
 
-For this reason, battery percentage alone is not treated as a precise energy
-measurement.
+Battery percentage is quantized and should not be treated as a precise energy measurement.
 
-Battery voltage is retained as an additional indicator, but it is also affected
-by:
+Battery voltage is more useful for observing trends, but it is also affected by:
 
-- load
+- instantaneous load
 - battery chemistry
 - relaxation after charging
 - temperature
-- recent motor operation
+- recent motor activity
 
-Therefore a comparison such as:
+Therefore:
 
 ```text
-device A lost X mV
-device B lost Y mV
+Device A lost X mV
+Device B lost Y mV
 ```
 
-cannot by itself establish that one firmware consumes a specific percentage
-more or less energy than another.
+does not by itself establish an exact difference in energy consumption.
 
-Longer observation periods and repeated behavior across multiple devices are
-required.
+Longer observation periods, repeated behavior, and controlled comparisons are required.
 
 ---
 
-# Next Long-Term Test Phase
+# Current Scientific Interpretation
 
-The previous phase was designed primarily to isolate and validate individual
-firmware mechanisms.
+The available evidence currently supports a multi-mechanism model.
 
-That phase has now provided:
-
-```text
-Stock 2.2.4
-    ↓
-periodic mDNS present
-beacon recovery present
-
-Patch B only
-    ↓
-periodic mDNS suppressed
-beacon recovery remains
-
-Patch A
-    ↓
-beacon recovery suppressed
-
-Patch A+B
-    ↓
-periodic mDNS suppressed during capture
-beacon recovery not observed during multi-hour test
-```
-
-The next phase changes focus from mechanism isolation to battery-runtime
-comparison.
-
-The intended test structure is:
+At minimum, the investigation has identified:
 
 ```text
-1 × stock 2.2.4 control
-        versus
-multiple A+B patched devices
+normal TRV workload
+        +
+periodic mDNS workload
+        +
+firmware-specific WLAN power management
+        +
+2.2.4 Beacon Recovery behavior
+        +
+possible conditional sleep-resource retention
+        +
+normal valve/motor activity
+        +
+cloud/network communication
+        +
+radio conditions
 ```
 
-The devices should begin the comparison as close as practical to a common
-starting condition:
+This remains a qualitative model.
 
-- batteries fully charged
-- fixed firmware configuration
-- normal installation positions
-- no intentional firmware changes during the observation period
-- continuous battery logging
-- runtime / reboot monitoring
-- RSSI monitoring
-- beacon statistics where available
-- motor activity tracking
+It is **not** a quantitative energy budget.
 
-The preferred observation period is multiple days, with at least approximately
-one week providing substantially more useful information than individual
-24-hour comparisons.
+The relative contribution of each component remains unknown.
 
-The stock 2.2.4 reference device should remain unmodified during this phase.
+The Beacon Recovery investigation has, however, progressed beyond identifying only an additional workload.
+
+The stock 2.2.4 host control flow now contains identifiable measurement and control-validity problems that can explain how recurring recovery can become self-sustaining after an initial qualifying event.
+
+That does not establish how much of the historical battery drain is caused by this mechanism.
 
 ---
 
-# Why the Isolated Patch Tests Were Important
+# What Has Been Established
 
-The individual patch experiments were intentionally performed before relying on
-the combined firmware.
+### Periodic mDNS is a real recurring workload
 
-Without the isolated Patch-B test, a successful A+B firmware would only show:
+Runtime packet capture confirms periodic mDNS probing/announcement behavior in later firmware.
 
-```text
-both targeted behaviors disappeared
-```
+### Beacon Recovery is a real recurring workload
 
-It would not answer whether suppressing periodic mDNS also indirectly changed
-beacon recovery.
+Affected stock 2.2.4 devices can enter recovery approximately once per minute for extended periods.
 
-The isolated experiment established:
+### Good RSSI does not prevent the observed recovery loop
 
-```text
-Patch B active
-        ↓
-periodic mDNS restart suppressed
-        ↓
-beacon recovery continues
-```
+Recurring recovery has been observed around `-58` to `-60 dBm`.
 
-This substantially improves the interpretation of the combined patch.
+### Periodic mDNS is not required for the observed recovery loop
 
-Likewise, Patch A demonstrates that the beacon-recovery entry can be suppressed
-without disabling the underlying beacon-statistics calculation.
+The isolated mDNS-patched device continued Beacon Recovery.
 
-The combined A+B firmware therefore represents the combination of two
-individually investigated modifications rather than an unexplained multi-byte
-change.
+### Patch A suppresses Beacon Recovery
 
----
+The underlying statistics continue operating.
 
-# Future Patch Architecture
+### Patch B suppresses the targeted periodic mDNS restart
 
-The currently implemented architecture is:
+Event-driven mDNS behavior is not intentionally removed.
 
-```text
-Patch A
-Beacon-recovery bypass
+### Patch A+B operates on real hardware
 
-Patch B
-Periodic mDNS restart bypass
-```
+Both targeted recurring mechanisms can be suppressed simultaneously while normal observed TRV functionality remains available.
 
-A possible future area remains:
+### Stock Beacon Recovery contains a stale-control-evidence loop
 
-```text
-Patch C
-Safe WLAN sleep-resource failure handling
-```
+A qualifying cached `real_beacon_skip` value can be reused after recovery without a fresh ratio calculation.
 
-Patch C is substantially more sensitive than A or B.
+### Stock Beacon Recovery contains a signed-value control problem
 
-Because the WUP / EM2 resources are reference-counted, no cleanup patch should
-be implemented until the complete ownership and failure semantics have been
-established for firmware 2.2.4.
+Positive calculated values can become negative after 8-bit signed interpretation and incorrectly satisfy the recovery predicate.
 
-There is currently no evidence sufficient to justify blindly releasing the
-resource.
+### The measurement window is not explicitly normalized
 
-Patch C is therefore a research topic, not a planned production modification.
+A fixed numerator is used even when the previous counter baseline can survive skipped measurement opportunities.
 
 ---
 
-# Evidence Classification
+# What Has NOT Been Established
 
-The project distinguishes between several evidence levels.
+The project does **not** currently claim:
 
-## Proven by static analysis
-
-Examples:
-
-- presence of specific firmware control paths
-- RSSI-to-desired-skip mapping
-- WF200 command construction
-- beacon counter calculation
-- periodic mDNS restart caller
-- Patch-B branch and bypass target
-- WUP / EM2 resource handling
-- access-point connection parameters
-
-## Proven by runtime observation
-
-Examples:
-
-- recurring 2.2.4 beacon-recovery logs
-- approximately once-per-minute recovery behavior on affected devices
-- Patch-A recovery suppression
-- continued beacon-statistics calculation after Patch A
-- periodic mDNS activity on firmware 2.1.3
-- approximately 60-second mDNS interval on firmware 2.1.3
-- periodic mDNS activity on stock firmware 2.2.4
-- approximately 180-second mDNS interval on stock firmware 2.2.4
-- absence of comparable periodic mDNS traffic from the 2.1.0 reference during
-  the simultaneous approximately 13-minute capture
-- suppression of the targeted periodic mDNS traffic with Patch B during the
-  monitored capture window
-- continued beacon recovery with Patch B alone
-- operation of combined Patch A+B on real hardware
-- absence of the targeted periodic mDNS cycle from the combined device during
-  the monitored capture window
-- absence of recurring beacon recovery from the combined device during the
-  monitored multi-hour runtime period
-
-## Strongly supported experimental interpretation
-
-The isolated Patch-B test supports the following statement:
-
-> Periodic mDNS restart activity is not required for the observed recurring
-> beacon-recovery cycle under the tested conditions.
-
-This does not establish universal independence under every possible network or
-firmware state.
-
-## Plausible but not quantitatively proven
-
-Examples:
-
-- electrical energy cost of beacon recovery
-- electrical energy cost of periodic mDNS restart
-- battery-life effect of either mechanism
-- combined battery-life effect of Patch A+B
-- frequency of the conditional WUP / EM2 retention failure in real operation
-- possible indirect interactions under conditions not yet tested
-
-## Not established
-
-The project does not currently claim:
-
-- that the complete battery-drain problem has been solved
+- that the complete historical battery-drain problem has been solved
+- that Beacon Recovery is the sole cause
+- that periodic mDNS is the sole cause
 - that Patch A+B restores a specific battery lifetime
-- that one mechanism explains all historical battery drain
+- that firmware 2.1.8 introduced the original problem
 - that firmware 2.1.3 is battery-drain free
-- that firmware 2.1.8 introduced the original battery-drain problem
-- that mDNS is the sole cause of battery drain
-- that beacon recovery is the sole cause of battery drain
-- that firmware 2.1.0 never emits mDNS traffic
-- that Patch A and Patch B are universally independent under every condition
-- that battery percentage directly represents precise consumed energy
+- that firmware 2.1.0 never emits mDNS
+- that the WUP / EM2 path is responsible for the observed historical regression
+- that the exact first Beacon Recovery trigger on the affected physical devices has been captured
+- that Patch C-C has completed hardware qualification
+- that Patch C-C has demonstrated a battery-life improvement on hardware
+- that any current patch is production firmware
+
+---
+
+# Current Research Direction
+
+The current work has two parallel goals.
+
+## 1. Long-Term Battery Comparison
+
+Continue controlled logging of stock and experimental firmware configurations.
+
+Primary measurements include:
+
+- battery voltage
+- reported battery percentage
+- uptime
+- RSSI
+- Beacon Recovery statistics
+- unexpected reboots
+- valve/motor activity
+- firmware configuration
+
+The objective is to determine whether removing specific recurring workloads produces a reproducible improvement in real battery behavior.
+
+## 2. Correct Beacon Recovery Instead of Disabling It
+
+Patch A demonstrated that Beacon Recovery can be bypassed.
+
+The current objective is more demanding:
+
+> Preserve legitimate Beacon Recovery while correcting the conditions that allow invalid or historical measurements to trigger it.
+
+The current C-C candidate has completed the first two qualification stages:
+
+```text
+static reverse engineering                 completed
+        ↓
+counterexample / falsification review      completed
+        ↓
+experimental build                         next
+        ↓
+independent binary / GBL verification
+        ↓
+controlled hardware A/B test
+        ↓
+long-term battery test
+```
+
+No known static blocker remains in the reviewed C-C design. The next step is therefore to create the experimental firmware artifact using a growth-aware GBL build process, then independently reparse and verify the resulting container before any hardware flashing is considered.
+
+Passing static qualification does **not** establish runtime correctness or battery-life improvement. Those claims require controlled hardware testing and long-term observation.
 
 ---
 
 # Documentation
 
-Detailed research notes are maintained under:
+Detailed research documentation is maintained under `docs/`.
+
+Public documentation contains reviewed findings, methodology, and reproducible technical results.
+
+Typical structure:
 
 ```text
 docs/
-
 ├── patch/
-│   └── README.md
-│
 ├── reverse-engineering/
-│   ├── ap-selection-and-roaming.md
-│   ├── beacon-rx-counter.md
-│   ├── firmware-comparison.md
-│   ├── mdns-periodic-restart.md
-│   ├── power-management-and-sleep.md
-│   ├── real-beacon-skip.md
-│   └── recovery-mechanism.md
-│
 └── testing/
-    ├── battery-testing.md
-    └── mdns-runtime-comparison.md
 ```
 
-The reverse-engineering documents describe the firmware mechanisms.
+Internal working notes, temporary reverse-engineering reports, unreviewed analysis output, and local development material are intentionally kept outside the public repository history.
 
-The testing documents describe runtime observations and experimental validation.
-
-The documentation will continue to be updated as the long-term battery dataset
-grows.
+The repository is intended to publish **research results**, not every intermediate analysis artifact.
 
 ---
 
 # Firmware Patcher
 
-A separate repository contains the local patching tool for the combined
-experimental firmware modification.
+A separate repository contains tooling for locally applying the currently released experimental firmware modifications:
 
-Repository:
-
-```text
 https://github.com/AbleMonster/Shelly-TRV-Gen1-2.2.4-patcher
-```
 
-The current experimental release is:
+The current experimental patcher applies the previously developed Patch A + Patch B combination.
 
-```text
-v1.0.0-beta.2
-```
+The patcher uses fail-closed validation and verifies the supported input before modification.
 
-The patcher currently applies:
+It does **not** distribute Shelly firmware.
 
-```text
-Patch A
-Beacon-recovery bypass
+Users must provide their own legitimately obtained supported firmware image.
 
-+
+The patched image is generated locally.
 
-Patch B
-Periodic mDNS restart bypass
-```
-
-The tool uses a fail-closed validation model.
-
-It verifies the exact supported original firmware before modification and
-checks the expected:
-
-- firmware size
-- SHA-256
-- GBL CRC32
-- GBL tag structure
-- program image
-- original patch instructions
-- resulting program hash
-- resulting GBL hash
-- resulting GBL CRC32
-- final byte differences
-
-The supported original GBL has:
-
-```text
-Size:
-1,106,384 bytes
-
-SHA-256:
-5c4a0b222a313350952f6b1200a855833402f168bd286090c23bd4d018ab918f
-
-CRC32:
-0xDC7BAB58
-```
-
-The validated combined output has:
-
-```text
-Size:
-1,106,384 bytes
-
-SHA-256:
-7adbb31d6b7faa8b9290d7b3436af45d42af9c3602a7195cafab774ded84ac61
-
-CRC32:
-0xBAEB8265
-```
-
-The patcher does **not** distribute Shelly firmware.
-
-Users must provide their own legally obtained supported firmware image.
-
-The patched firmware is generated locally.
-
-No original or modified Shelly firmware image is distributed through the
-research or patcher repositories.
-
----
-
-# Local OTA Testing
-
-The separate patcher project also contains a local OTA HTTP server.
-
-The server:
-
-- validates the expected combined patched firmware
-- serves the firmware locally
-- supports HTTP/1.1
-- supports byte-range requests
-- returns `206 Partial Content` for Range requests
-- does not download or distribute firmware itself
-
-The complete local workflow has been tested:
-
-```text
-original supported GBL
-        ↓
-local patcher
-        ↓
-validated A+B GBL
-        ↓
-local OTA server
-        ↓
-HTTP transfer
-        ↓
-SHTRV-01 OTA installation
-        ↓
-firmware 2.2.4 boots
-```
-
-Both normal HTTP transfer and byte-range behavior have been validated.
-
-Successful HTTP transfer alone should not be interpreted as proof of successful
-firmware installation.
-
-Post-installation device status and runtime behavior must be verified
-separately.
+Patch C is not part of the released patcher unless and until its implementation has completed the required qualification process.
 
 ---
 
@@ -1733,22 +970,56 @@ separately.
 
 This repository is intended to contain:
 
-- analysis results
+- reviewed analysis results
 - technical documentation
 - experimental methodology
 - small patch descriptions
-- tooling written specifically for this research
+- independently developed research tooling
 - sanitized runtime results
-- long-term battery-test methodology and conclusions
+- battery-test methodology
+- reproducible findings
 
 It is not intended to redistribute proprietary Shelly firmware.
 
-Original firmware binaries, patched firmware binaries, large disassembly dumps
-and unreviewed reverse-engineering output should not be committed.
+The repository should not contain:
 
-The general rule is:
+- original Shelly firmware images
+- complete modified Shelly firmware images
+- proprietary extracted application images
+- large raw disassembly dumps
+- unreviewed reverse-engineering output
+- credentials or private device information
+
+General principle:
 
 > Publish the results of the analysis, not the disassembled firmware.
+
+---
+
+# Contributing
+
+Contributions are welcome when they improve reproducibility, challenge existing conclusions, provide independent runtime evidence, or identify alternative interpretations.
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting an issue or pull request.
+
+Research contributions should clearly distinguish:
+
+- PROVEN
+- STRONGLY SUPPORTED
+- INFERENCE
+- UNKNOWN
+
+Contradicting an existing conclusion is explicitly welcome when supported by reproducible evidence.
+
+---
+
+# Security
+
+Security-sensitive findings should not be disclosed through a public issue.
+
+See [SECURITY.md](SECURITY.md) for the project's reporting policy and private contact information.
+
+This project is independent research and is not an official Shelly security or support channel.
 
 ---
 
@@ -1756,171 +1027,19 @@ The general rule is:
 
 All firmware modifications in this project are experimental.
 
-A modified firmware image can potentially:
+Modified firmware can potentially:
 
 - make a device unreachable
 - cause unexpected WLAN behavior
-- require recovery or reflashing
 - affect battery life
-- affect normal thermostat operation
+- affect thermostat operation
+- require recovery or reflashing
 
-Do not deploy experimental firmware to devices where failure could create an
-unsafe condition.
+Do not deploy experimental firmware where failure could create an unsafe condition.
 
-Always retain a known-good firmware image and a recovery path.
+Always retain a known-good recovery path.
 
----
-
-# Current Conclusions
-
-The investigation has established several important facts.
-
-### Firmware 2.2.4 contains a recurring beacon-recovery mechanism
-
-This mechanism can repeatedly place the WLAN subsystem into a temporary
-active / always-on state.
-
-On affected test devices it has been observed at approximately one event per
-minute.
-
-The mechanism can be bypassed experimentally using Patch A.
-
-### Periodic mDNS restart behavior appeared after firmware 2.1.0
-
-Static analysis identified the recurring caller in firmware 2.1.3.
-
-Runtime packet capture confirmed the resulting network traffic.
-
-### The mDNS period changed in later firmware
-
-Observed runtime behavior:
-
-```text
-2.1.0        no periodic burst observed during ~13 min
-2.1.3        ~60-second periodic mDNS burst
-2.2.4 stock  ~180-second periodic mDNS burst
-```
-
-### The periodic 2.2.4 mDNS restart can be bypassed
-
-Patch B suppresses the targeted periodic restart call.
-
-During the isolated Patch-B runtime test, the characteristic periodic mDNS
-traffic was not observed during the monitored packet-capture window.
-
-Normal connectivity remained available.
-
-### Suppressing periodic mDNS does not suppress beacon recovery
-
-The Patch-B-only `.77` device continued to enter the recurring beacon-recovery
-path at approximately one event per minute.
-
-This occurred even at good RSSI with desired beacon skip 20.
-
-The periodic mDNS restart is therefore not required for the observed
-beacon-recovery cycle under the tested conditions.
-
-### Patch A and Patch B can operate together
-
-The combined A+B firmware has been installed and run successfully on real
-SHTRV-01 hardware.
-
-During the monitored tests:
-
-```text
-periodic mDNS restart   not observed
-beacon recovery         not observed
-normal connectivity     operational
-normal TRV operation    operational
-```
-
-Long-term stability testing continues.
-
-### A conditional WLAN sleep-resource retention path exists
-
-However, the fundamental path already exists in firmware 2.1.0 and therefore
-cannot by itself explain the later battery-runtime regression.
-
-### The battery-drain problem is not yet proven solved
-
-This remains the most important limitation.
-
-Patch A removes a confirmed recurring WLAN recovery workload.
-
-Patch B removes a confirmed recurring mDNS workload.
-
-The combined patch removes both targeted behaviors during the observed tests.
-
-However:
-
-```text
-removing unnecessary recurring activity
-```
-
-is not equivalent to:
-
-```text
-proving the historical battery-drain problem is solved
-```
-
-Current battery observations remain mixed.
-
-Some beacon-patched devices have continued to lose noticeable battery voltage
-despite the recovery counter remaining at zero.
-
-The combined A+B device has shown encouraging initial behavior, but the
-observation period is still too short for a battery-life conclusion.
-
-The strongest current interpretation therefore remains that several mechanisms
-may contribute to total battery consumption.
-
-Their individual electrical contribution remains unknown.
-
----
-
-# Current Research Direction
-
-The mechanism-isolation phase has now answered several important questions.
-
-The project is moving into a broader long-term battery comparison.
-
-The next experimental phase will use:
-
-```text
-stock 2.2.4 control
-        versus
-multiple A+B patched devices
-```
-
-with batteries charged as consistently as practical before the comparison.
-
-The main measurements will include:
-
-- battery voltage
-- reported battery percentage
-- uptime
-- unexpected reboots
-- RSSI
-- beacon statistics
-- beacon-recovery counter
-- valve / motor activity
-- motor steps
-- firmware / patch configuration
-
-The stock reference device should remain unchanged throughout this comparison.
-
-The goal is not merely to determine whether the patches function.
-
-That has already been demonstrated for the targeted mechanisms.
-
-The next question is:
-
-> Does removing the two confirmed recurring workloads produce a reproducible
-> improvement in real battery behavior over an extended observation period?
-
-A positive answer requires long-term data.
-
-Until those data exist, the combined A+B firmware remains experimental.
+Testing should only be performed on devices and networks you own or are authorized to use.
 
 ---
 
@@ -1935,6 +1054,8 @@ reverse engineering
     ↓
 hypothesis
     ↓
+falsification
+    ↓
 controlled modification
     ↓
 runtime validation
@@ -1942,8 +1063,7 @@ runtime validation
 long-term observation
 ```
 
-A plausible mechanism is not treated as a proven battery-drain cause until the
-available evidence supports that conclusion.
+A plausible mechanism is not treated as a proven battery-drain cause merely because it exists in the firmware.
 
 Likewise:
 
@@ -1951,13 +1071,44 @@ Likewise:
 Patch works
 ```
 
-means only that the targeted firmware behavior has been modified as intended.
+means that the targeted firmware behavior changed as intended.
 
-It does not automatically mean:
+It does **not** automatically mean:
 
 ```text
 Battery drain fixed
 ```
 
-That distinction will remain central to the project as the long-term testing
-continues.
+The objective is not simply to remove activity from the firmware.
+
+The objective is to understand why that activity exists, determine whether its control logic is valid, preserve legitimate functionality, and correct only the behavior that the available evidence demonstrates is defective.
+
+---
+
+# License
+
+Original code, scripts, tooling, documentation, and other copyrightable material created specifically for this project are licensed under the GNU General Public License v3.0 only (`GPL-3.0-only`), unless otherwise stated.
+
+See [LICENSE](LICENSE) for the full license terms.
+
+## Third-Party Firmware and Intellectual Property
+
+This license applies only to material for which the contributors to this repository hold the necessary rights.
+
+Shelly firmware, firmware components, trademarks, product names, and other third-party intellectual property remain the property of their respective owners and are not licensed under the GPL by this project.
+
+This repository does not distribute original or modified Shelly firmware images.
+
+Reverse-engineering documentation, independently developed tools, patch descriptions, offsets, and small technical excerpts are provided for research, interoperability, debugging, and reproducibility purposes.
+
+Users are responsible for obtaining any required firmware from legitimate sources and for complying with applicable licenses and laws.
+
+---
+
+# Project Independence
+
+This project is an independent community research effort.
+
+It is not affiliated with, sponsored by, or endorsed by Shelly or Shelly Group.
+
+Product names and trademarks are used only to identify the devices and firmware being studied.

@@ -41,7 +41,12 @@ env/
 # Local configuration / secrets
 # ============================================================
 
+# Legacy battery logger path
 scripts/battery_logger/config.json
+
+# Current battery logger path
+tools/scripts/battery_logger/config.json
+
 .env
 .env.*
 *.local
@@ -51,16 +56,38 @@ scripts/battery_logger/config.json
 # Battery logger runtime data
 # ============================================================
 
+# Legacy path
 scripts/battery_logger/debug_logs/
 scripts/battery_logger/reports/
 
 scripts/battery_logger/*.sqlite3
 scripts/battery_logger/*.sqlite3-wal
 scripts/battery_logger/*.sqlite3-shm
+scripts/battery_logger/*.sqlite3-journal
 
 scripts/battery_logger/*.db
 scripts/battery_logger/*.db-wal
 scripts/battery_logger/*.db-shm
+scripts/battery_logger/*.db-journal
+
+scripts/battery_logger/*.csv
+
+
+# Current path
+tools/scripts/battery_logger/debug_logs/
+tools/scripts/battery_logger/reports/
+
+tools/scripts/battery_logger/*.sqlite3
+tools/scripts/battery_logger/*.sqlite3-wal
+tools/scripts/battery_logger/*.sqlite3-shm
+tools/scripts/battery_logger/*.sqlite3-journal
+
+tools/scripts/battery_logger/*.db
+tools/scripts/battery_logger/*.db-wal
+tools/scripts/battery_logger/*.db-shm
+tools/scripts/battery_logger/*.db-journal
+
+tools/scripts/battery_logger/*.csv
 
 
 # ============================================================
@@ -108,6 +135,7 @@ temp/
 *.tgz
 *.7z
 
+
 # ============================================================
 # Ghidra local project files
 # ============================================================
@@ -122,8 +150,9 @@ temp/
 
 original/
 
+
 # ============================================================
-# Local dokumetation
+# Local documentation / private research notes
 # ============================================================
 
 docs/local/Codex_REA_Ghidra_Startanleitung.md

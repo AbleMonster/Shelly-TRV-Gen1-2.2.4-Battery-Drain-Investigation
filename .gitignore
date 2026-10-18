@@ -156,3 +156,26 @@ original/
 # ============================================================
 
 docs/local/Codex_REA_Ghidra_Startanleitung.md
+
+# ============================================================
+# Local build / qualification workspaces
+# ============================================================
+
+build_cc/
+build_min80_static_2026-10-17/
+build_min80_stock_control_2026-10-17/
+build_pmd210_static_2026-10-17/
+
+# ============================================================
+# Local Tools
+# ============================================================
+
+# Research-only OTA server variants
+tools/scripts/ota_server/ota_server_cc.py
+tools/scripts/ota_server/ota_server_diagnose_cc.py
+tools/scripts/ota_server/ota_server_diagnose_stock.py
+tools/scripts/ota_server/ota_server_diagnose_stock_2.1.0.py
+
+# Research-only analysis helpers
+tools/scripts/analyze/audit_historical_subsystems.py
+tools/scripts/analyze/build_patched_gbl.py

@@ -179,3 +179,6 @@ tools/scripts/ota_server/ota_server_diagnose_stock_2.1.0.py
 # Research-only analysis helpers
 tools/scripts/analyze/audit_historical_subsystems.py
 tools/scripts/analyze/build_patched_gbl.py
+# Internal research / REA build artifacts
+builds/
+build_*/

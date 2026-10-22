@@ -1,4 +1,3 @@
-````markdown
 # Experimental Firmware Patches
 
 ## Shelly TRV Gen1 Firmware 2.2.4
@@ -2178,4 +2177,3 @@ All product names and trademarks belong to their respective owners.
 The documented patches are experimental research artifacts for the specific firmware versions and devices investigated.
 
 They should not be treated as official firmware updates or vendor-supported fixes.
-````

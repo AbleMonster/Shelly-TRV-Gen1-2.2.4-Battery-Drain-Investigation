@@ -1,4 +1,3 @@
-````markdown
 # WLAN Power-Management Lifecycle and A1
 
 ## Shelly TRV Gen1 Firmware 2.2.4
@@ -1735,4 +1734,3 @@ It is not affiliated with, endorsed by, or supported by Shelly Group or Silicon 
 The analysis applies to the firmware versions and hardware investigated here.
 
 Experimental firmware should only be used on devices where recovery or reflashing is possible.
-````

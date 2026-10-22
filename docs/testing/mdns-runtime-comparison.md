@@ -1,4 +1,3 @@
-```markdown
 # mDNS Runtime Comparison
 
 ## Scope
@@ -1134,4 +1133,3 @@ All product names and trademarks belong to their respective owners.
 The findings describe observed and reverse-engineered behavior of the examined firmware versions and experimental configurations.
 
 Statements about battery-drain causality are intentionally limited to what the available static and runtime evidence supports.
-```

@@ -1,4 +1,3 @@
-````markdown
 # Shelly TRV Gen1 – Battery-Drain Investigation
 
 Reverse engineering, runtime analysis, long-term battery testing, and experimental firmware research for the Shelly TRV Gen1 (`SHTRV-01`).
@@ -1556,4 +1555,3 @@ This is an independent community research project.
 It is not affiliated with, sponsored by, or endorsed by Shelly Group or Silicon Labs.
 
 Product names and trademarks are used only to identify the devices and firmware being studied.
-````

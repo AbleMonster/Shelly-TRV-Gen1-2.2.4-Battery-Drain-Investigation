@@ -1,128 +1,140 @@
+````markdown
 # Shelly TRV Gen1 – Battery-Drain Investigation
 
 Reverse engineering, runtime analysis, long-term battery testing, and experimental firmware research for the Shelly TRV Gen1 (`SHTRV-01`).
 
-This project investigates the unusually high battery consumption observed on Shelly TRV Gen1 devices and attempts to identify the firmware mechanisms that contribute to it.
+This project investigates the unusually high battery consumption observed on Shelly TRV Gen1 devices.
 
-The research currently focuses on firmware generations from `2.1.0` through `2.2.4`, with firmware `2.2.4` as the primary reverse-engineering target.
+The primary reverse-engineering target is:
+
+```text
+20240619-130912/v2.2.4@ee290818
+```
+
+Older firmware from `2.1.0` through `2.1.8` is used for comparison.
 
 The project does **not** assume that the historical battery-drain problem has a single cause.
 
-Instead, firmware comparison, runtime observation, packet capture, controlled patching, and long-term battery logging are used to separate individual mechanisms and determine their actual relevance.
+Instead, firmware comparison, native ARM analysis, runtime logging, packet capture, controlled firmware modifications and long-term battery tests are used to separate individual mechanisms and determine which ones actually matter.
+
+The investigation has now identified several concrete firmware defects, including:
+
+- invalid Beacon Recovery control semantics in 2.2.4
+- reuse of stale Beacon Recovery evidence
+- invalid beacon-measurement windows
+- WLAN power-management lifecycle and settlement defects
+- a shared host sleep-blocker reference-counter race
+
+Several of these defects have experimental corrections.
+
+The historical battery-drain problem is **not yet considered completely solved**.
 
 ---
 
 # Current Status
 
-Research is ongoing.
+The project has progressed beyond the original Beacon Recovery and mDNS isolation experiments.
 
-Several important firmware behaviors have now been identified and independently validated.
+The current picture is:
 
-The most important current findings are:
+```text
+Historical drain
+    |
+    +-- exists before 2.2.4
+    |
+    +-- therefore cannot be explained by one
+        2.2.4-only mechanism
 
-- periodic connected mDNS restart activity was introduced after firmware 2.1.0
-- firmware 2.2.4 contains an additional Beacon Recovery mechanism
-- the Beacon Recovery mechanism contains multiple measurement/control-validity problems
-- a qualifying Beacon Recovery result can become self-sustaining because historical control evidence is reused
-- the first recovery can also be triggered from an invalid measurement window
-- an additional signed-value interpretation problem exists in the recovery decision
-- Patch A experimentally suppresses Beacon Recovery
-- Patch B experimentally suppresses the periodic 2.2.4 mDNS restart
-- Patch A and Patch B can operate together on real hardware
-- long-term battery testing is ongoing
-- the current Patch C-C candidate has passed static pre-build qualification; experimental build and hardware qualification remain pending
 
-The historical battery-drain problem is **not yet considered solved**.
+2.2.4
+    |
+    +-- Beacon Recovery
+    |     |
+    |     +-- C1a signed-value problem
+    |     +-- C1b measurement-window problem
+    |     +-- C2 stale-evidence loop
+    |     |
+    |     +-- corrected experimentally by C-C
+    |
+    +-- PM lifecycle / ownership defects
+    |     |
+    |     +-- corrected experimentally by A1
+    |
+    +-- shared B2 blocker-counter race
+    |     |
+    |     +-- demonstrated statically
+    |     +-- physical occurrence under investigation
+    |
+    +-- PA8 WLAN sleep gate
+          |
+          +-- intentional mechanism
+          +-- runtime duty under investigation
+
+
+WF200
+    |
+    +-- stock 2.2.4: 3.16.1
+    |
+    +-- experimental: 3.18.0
+          |
+          +-- Silicon Labs sleep-related fix
+          +-- successfully tested with Shelly FMAC 3.7.0
+```
+
+The current integrated experimental platform is:
+
+```text
+A1
++
+C-C
++
+WF200 3.18.0
+```
+
+It has passed static qualification and successfully booted and operated on physical TRV hardware.
+
+A separate **Stock Host Observer** is currently being qualified to observe the B2 reference-counter race, actual EM1/EM2 entry and PA8 sleep vetoes without correcting the stock behavior.
 
 ---
 
-# Firmware Versions Investigated
+# Main Findings
 
-| Firmware | Build | Role |
-|---|---|---|
-| 2.1.0 | `20211223-144805/v2.1.0@d30148ec` | older reference |
-| 2.1.3 | `20220202-080736/v2.1.3@d255ad74` | early comparison |
-| 2.1.8 | `20220811-152343/v2.1.8@5afc928c` | later comparison |
-| 2.2.4 | `20240619-130912/v2.2.4@ee290818` | primary research target |
+## 1. Battery Drain Predates Firmware 2.2.4
 
-The exact firmware version in which the historical battery-runtime degradation first appeared remains unknown.
+Battery-drain behavior has also been observed on firmware older than 2.2.4.
 
-Battery drain was also observed in practical use after downgrading from 2.2.4 to 2.1.8.
+This is important because several mechanisms identified during the investigation are specific to 2.2.4.
 
 Therefore:
 
-> Firmware 2.2.4 cannot currently be considered the origin of the entire historical battery-drain problem.
+> A defect introduced only in firmware 2.2.4 cannot by itself explain the complete historical Shelly TRV Gen1 battery-drain problem.
 
-Firmware 2.1.0 is used as an older reference because several WLAN-related behaviors differ significantly from later firmware.
+Firmware chronology is used throughout the project to distinguish:
 
----
+- shared mechanisms
+- later amplifiers
+- recovery mechanisms
+- unrelated recurring workloads
 
-# Research Method
-
-The investigation combines:
-
-- native ARM Thumb firmware analysis
-- cross-version firmware comparison
-- control-flow reconstruction
-- WF200 host-interface analysis
-- runtime debug logging
-- passive network capture
-- controlled firmware modifications
-- isolated A/B testing
-- long-term battery logging
-- battery-voltage comparison
-- runtime and reboot tracking
-- RSSI monitoring
-- Beacon Recovery statistics
-- valve/motor activity analysis
-
-Decompiler output is treated as supporting information.
-
-Where possible, important findings are verified against native instructions, control flow, runtime behavior, or independent measurements.
+from the underlying historical problem.
 
 ---
 
-# Evidence Classification
-
-The project uses four evidence levels.
-
-### PROVEN
-
-Directly established from native firmware behavior, deterministic static analysis, validated binary changes, or sufficiently direct runtime evidence.
-
-### STRONGLY SUPPORTED
-
-Multiple independent findings support the conclusion, but some implementation detail or environmental dependency remains unresolved.
-
-### INFERENCE
-
-A technically plausible interpretation consistent with the available evidence, but not directly established.
-
-### UNKNOWN
-
-The available evidence is insufficient to determine the behavior or intent.
-
-These classifications are intentionally used to distinguish firmware facts from interpretation.
-
----
-
-# Key Finding 1 – Periodic mDNS Restart
+# 2. Periodic mDNS Restart
 
 The mDNS responder itself already exists in firmware 2.1.0.
 
-The important later change is the addition of recurring connected maintenance that restarts the mDNS probing process.
+Later firmware adds recurring connected maintenance that restarts the mDNS probing sequence.
 
-Runtime packet capture confirmed the resulting periodic traffic.
+Runtime packet capture showed approximately:
 
-Observed behavior:
-
-| Firmware | Runtime observation |
+| Firmware | Periodic mDNS observation |
 |---|---|
-| 2.1.0 | no comparable periodic burst observed during the monitored ~13-minute window |
-| 2.1.3 | approximately one burst every 60 seconds |
-| 2.2.4 | approximately one burst every 180 seconds |
+| 2.1.0 | no comparable periodic burst observed during ~13 min |
+| 2.1.3 | ~60 s |
+| 2.2.4 | ~180 s |
 
-A typical burst contains:
+A typical recurring sequence contains approximately:
 
 ```text
 probe
@@ -131,57 +143,33 @@ probe
 announcement
 ```
 
-In firmware 2.2.4, the approximately 180-second interval is not implemented as a dedicated 180-second timer.
+Patch B suppresses the targeted periodic restart without globally disabling mDNS.
 
-The relevant connected maintenance path is serviced on a minute basis and the mDNS restart is reached every third applicable invocation.
+A long-term Patch-B device continued stock Beacon Recovery at approximately:
 
-### Interpretation
+```text
+58.3 events/hour
+```
 
-**PROVEN:** The recurring mDNS restart creates additional periodic firmware and network activity.
+and ultimately reached:
 
-**UNKNOWN:** Its quantitative contribution to battery drain.
+```text
+0 %
+3.116 V
+~9.23 days uptime
+```
 
-No direct electrical energy measurement per mDNS cycle has yet been performed.
+with the periodic restart suppressed.
+
+This establishes that the targeted periodic mDNS restart is **not required** for recurring Beacon Recovery and that suppressing it alone did not prevent poor battery endurance on that test device.
+
+Its quantitative energy cost has not been measured.
 
 ---
 
-# Patch B – Periodic mDNS Restart Bypass
+# 3. Beacon Recovery in Firmware 2.2.4
 
-Patch B is an experimental firmware modification that bypasses the recurring 2.2.4 mDNS restart call.
-
-It does **not** remove mDNS itself.
-
-Other event-driven mDNS functionality remains present.
-
-The modification is therefore described as:
-
-```text
-Periodic mDNS restart bypass
-```
-
-and not:
-
-```text
-mDNS disabled
-```
-
-Runtime packet capture on the isolated Patch-B test device confirmed that the targeted periodic mDNS traffic disappeared during the monitored test window.
-
-Normal connectivity remained available.
-
-Importantly, Beacon Recovery continued to occur.
-
-This provides strong evidence that:
-
-> The periodic mDNS restart is not required for the observed recurring Beacon Recovery behavior under the tested conditions.
-
-This does not prove that the mechanisms can never interact under other conditions.
-
----
-
-# Key Finding 2 – Beacon Recovery
-
-Firmware 2.2.4 contains an additional WLAN Beacon Recovery mechanism.
+Firmware 2.2.4 contains an additional host-side Beacon Recovery mechanism.
 
 The characteristic runtime message is:
 
@@ -189,83 +177,84 @@ The characteristic runtime message is:
 minutes_tick: Beacon skip error! Attempt recovery
 ```
 
-When triggered, the firmware approximately performs:
+A typical Recovery sequence approximately performs:
 
 ```text
-normal Fast Power Save
-        ↓
+normal connected power save
+        |
+        v
 Beacon Recovery
-        ↓
+        |
+        v
 PM state 1 / active WLAN
-        ↓
-approximately 5 seconds
-        ↓
-restore normal PM policy
-        ↓
-normally state 3 / Fast Power Save
+        |
+        | ~5 serviced seconds
+        v
+restore connected PM policy
 ```
 
-State 1 places the WF200 into an active configuration and temporarily prevents the normal deeper host sleep behavior associated with the connected power-save state.
+Affected stock devices can repeat this sequence approximately once per minute for extended periods.
 
-No evidence was found that the normal recovery sequence intentionally performs a complete Wi-Fi reconnect, DHCP renewal, or cloud reconnect.
+Good RSSI does not prevent it.
 
-No explicit transmit-power increase was identified.
+The Recovery mechanism is driven by a host-side value exposed as:
 
-On affected stock 2.2.4 devices, the recovery has been observed approximately once per minute for extended periods.
+```text
+real_beacon_skip
+```
 
-The behavior has also occurred with good RSSI, for example around `-58` to `-60 dBm`.
-
-Poor RSSI is therefore not a necessary condition for the observed recurring recovery loop.
+Despite its name, this value is **not** a direct readback of the physical beacon-skip state programmed into the WF200.
 
 ---
 
-# Beacon Measurement
+# 4. What `real_beacon_skip` Actually Represents
 
 Firmware 2.2.4 periodically requests WF200 statistics.
 
-The relevant host-side measurement uses a cumulative received-beacon counter.
+The relevant host calculation uses the cumulative received-beacon counter.
 
-For a previous value `P` and current value `C`, the firmware derives:
+For:
+
+```text
+P = previous cumulative counter
+C = current cumulative counter
+```
+
+the host calculates:
 
 ```text
 delta = C - P
 ```
 
-and approximately calculates:
+followed approximately by:
 
 ```text
-real_beacon_skip = 600 / delta
+R = uint8_t(600 / delta)
 ```
 
-The result is stored in an 8-bit field.
+where `R` becomes the cached `real_beacon_skip`.
 
-The value is also exposed diagnostically through firmware statistics.
+The same cached value is later used by Beacon Recovery control logic.
 
-The same stored value is later used by the Beacon Recovery control logic.
-
-This creates several important validity problems.
+Reverse engineering identified three separate validity problems in this chain.
 
 ---
 
-# C1a – Signed Beacon-Skip Interpretation
+# 5. C1a — Signed Control-Value Problem
 
-The calculated quotient is stored as one byte.
+The calculated quotient is stored as an 8-bit value but later interpreted by the Recovery decision as signed.
 
-The recovery decision in stock firmware 2.2.4 subsequently reads that byte as a **signed** value.
-
-This creates unexpected qualifying values.
-
-Examples:
+For example:
 
 ```text
 delta = 3
 
 600 / 3 = 200
 
-8-bit value:
+uint8_t:
 0xC8
 
-signed interpretation:
+int8_t:
 -56
 ```
 
@@ -276,16 +265,16 @@ delta = 4
 
 600 / 4 = 150
 
-8-bit value:
+uint8_t:
 0x96
 
-signed interpretation:
+int8_t:
 -106
 ```
 
-Because the recovery predicate accepts values less than or equal to `2` after rejecting zero, these negative interpretations can incorrectly satisfy the recovery condition.
+These negative interpretations can satisfy the stock Recovery comparison.
 
-The fresh-trigger set under the stock signed-byte behavior is therefore:
+The resulting stock fresh-trigger set includes:
 
 ```text
 delta = 3
@@ -293,645 +282,959 @@ delta = 4
 delta = 201 .. 600
 ```
 
-Under the intended non-negative quotient interpretation, only the range producing actual values `1` or `2` should satisfy that comparison.
-
-### Classification
-
-**PROVEN:** The signed byte interpretation changes the control decision for valid positive quotient values such as 150 and 200.
-
-**STRONGLY SUPPORTED:** This represents a control/measurement-validity defect rather than an intentional negative error-code mechanism.
-
-No independent negative sentinel or error semantics have been identified for this field.
+This is a control-validity defect in the 2.2.4 host logic.
 
 ---
 
-# C1b – Measurement-Window Validity
+# 6. C1b — Measurement-Window Problem
 
-The firmware uses the fixed numerator:
+The host calculation uses the fixed numerator:
 
 ```text
 600
 ```
 
-but the Beacon Recovery calculation does not contain a corresponding elapsed-time normalization for the stored baseline `P`.
+without carrying corresponding elapsed-time information with the previous beacon-counter baseline.
 
-This matters because the previous cumulative counter can survive situations in which one or more expected measurement opportunities are skipped.
-
-Conceptually:
+If expected measurement opportunities are skipped while the old baseline survives:
 
 ```text
 baseline P
-    ↓
-measurement opportunity skipped
-    ↓
+    |
+    v
+measurement skipped
+    |
+    v
 P survives
-    ↓
-another opportunity skipped
-    ↓
-P still survives
-    ↓
-later current value C
-    ↓
+    |
+    v
+later C
+    |
+    v
 600 / (C - P)
 ```
 
-The resulting `delta` can therefore represent a longer interval than the calculation assumes.
+the resulting `delta` can represent a longer interval than the formula assumes.
 
-Several WLAN power-management and maintenance paths can affect whether a normal measurement opportunity is available.
-
-### Why this matters
-
-A sufficiently aged baseline can produce a quotient of `1` or `2` even when the underlying beacon reception does not represent the failure condition that the calculation appears intended to detect.
-
-### Classification
-
-**PROVEN:** The fixed-600 calculation contains no corresponding elapsed-time normalization.
-
-**PROVEN:** Identified firmware paths can preserve the previous baseline while measurement opportunities are skipped.
-
-**STRONGLY SUPPORTED:** This creates a genuine measurement-validity problem.
-
-**UNKNOWN:** Whether this is the mechanism responsible for the first Beacon Recovery event observed on the current physical test devices.
-
-Capturing the exact first trigger remains an important runtime objective.
+The value can therefore become invalid as control evidence even though the underlying cumulative beacon counter itself is valid.
 
 ---
 
-# C2 – Self-Sustaining Beacon Recovery
+# 7. C2 — Self-Sustaining Recovery
 
-The most important Beacon Recovery control-flow finding concerns what happens **after a qualifying recovery event**.
+The most important recurring-Recovery defect occurs after a qualifying event.
 
 Two values are relevant:
 
 ```text
-P = previous cumulative beacon receive counter
-
+P = previous beacon-counter baseline
 R = cached real_beacon_skip
 ```
 
-During a qualifying recovery, stock firmware clears `P`.
+Stock Recovery clears:
 
-However, the qualifying `R` value is retained.
+```text
+P
+```
 
-The next successful measurement therefore begins with:
+but retains:
+
+```text
+R
+```
+
+The next successful statistics sample sees:
 
 ```text
 P = 0
-R = previous qualifying value
 ```
 
-Because `P` is zero, the firmware cannot calculate a fresh delta.
+and therefore establishes a new baseline without calculating a fresh `R`.
 
-It instead installs the current cumulative counter as the new baseline.
+Stock control flow can nevertheless evaluate the old cached `R` again.
 
-However, stock control flow then continues to evaluate the **old cached R value**.
-
-The sequence becomes:
+The resulting sequence is:
 
 ```text
 fresh qualifying R
-        ↓
-Beacon Recovery
-        ↓
-P = 0
+        |
+        v
+Recovery
+        |
+        v
+P cleared
 R retained
-        ↓
-next successful statistics sample
-        ↓
-P was zero
-        ↓
-current counter becomes new P
-        ↓
-no fresh R was calculated
-        ↓
-old qualifying R is evaluated anyway
-        ↓
-Beacon Recovery again
-        ↓
-P = 0
-        ↓
+        |
+        v
+next sample establishes new P
+        |
+        v
+no fresh R calculated
+        |
+        v
+old R evaluated again
+        |
+        v
+Recovery
+        |
+        v
 repeat
 ```
 
-This prevents the newly installed baseline from surviving long enough to obtain the next fresh measurement.
+A new beacon anomaly is therefore not required for every subsequent Recovery.
 
-### Important consequence
-
-Once the system enters this state, a new beacon anomaly is **not required for every subsequent recovery**.
-
-The historical qualifying value can repeatedly trigger the recovery path.
-
-### Classification
-
-**PROVEN:** This self-sustaining state exists in the identified stock 2.2.4 control flow.
-
-**PROVEN:** Normal successful post-recovery statistics acquisition does not by itself break the loop.
-
-**PROVEN:** The normal PM restoration does not clear the cached qualifying value.
-
-**UNKNOWN:** Whether preserving the value was originally intended as diagnostic history.
-
-The value is exposed through `/stats`, so retaining the last calculated result has a plausible diagnostic purpose.
-
-The problem is therefore better described as a failure to distinguish:
-
-```text
-historical diagnostic value
-```
-
-from:
-
-```text
-fresh control evidence
-```
-
-rather than simply assuming that retaining the value itself was accidental.
+This explains how one qualifying result can become an approximately minute-spaced self-sustaining Recovery loop.
 
 ---
 
-# Combined Beacon-Recovery Failure Model
+# 8. Patch C-C
 
-The current firmware analysis supports the following possible sequence:
+C-C corrects the identified Beacon Recovery validity problems while retaining Recovery for fresh valid qualifying evidence.
+
+It addresses:
 
 ```text
-measurement window becomes invalid
-        ↓
-aged or otherwise invalid baseline
-        ↓
-qualifying real_beacon_skip result
-        ↓
-first Beacon Recovery
-        ↓
-P cleared
-R retained
-        ↓
-historical R reused as fresh control evidence
-        ↓
-recovery approximately every minute
-        ↓
-self-sustaining recovery cycle
+C1a
+C1b
+C2
 ```
 
-The first-trigger validity problems and the post-recovery loop are separate defects.
-
-A false first trigger is therefore not required for the post-recovery problem to exist.
-
-Likewise, correcting only the first-trigger calculation would not correct the stale-control-evidence loop after a genuinely qualifying recovery.
-
-The exact cause of the first recovery event on the currently affected physical devices remains under investigation.
-
----
-
-# Patch A – Beacon-Recovery Bypass
-
-Patch A was developed before the complete Beacon Recovery control flow was understood.
-
-It changes the branch entering the recovery block while leaving the surrounding beacon-statistics calculation active.
-
-Runtime testing confirmed:
-
-- Beacon Recovery is suppressed
-- beacon statistics continue to update
-- normal Wi-Fi remains available
-- cloud connectivity remains available
-- thermostat operation remains available
-
-Patch A has therefore been extremely useful as an **experimental isolation tool**.
-
-However, the later reverse engineering changed its interpretation.
-
-Beacon Recovery itself has a legitimate reliability purpose: a fresh and genuinely abnormal beacon measurement can justify reconfiguring the WF200 power-management state.
-
-Patch A suppresses that recovery entirely.
-
-Therefore:
-
-> Patch A should not currently be considered the preferred final correction for the Beacon Recovery defect.
-
-It remains valuable for controlled A/B testing and for measuring the cost of the recovery workload.
-
----
-
-# Patch C – Corrective Beacon-Recovery Research
-
-The current Patch C research aims to correct the identified Beacon Recovery validity problems **without removing legitimate recovery behavior**.
-
-The behavioral requirements are:
-
-1. preserve diagnostic Beacon Recovery statistics
-2. prevent signed-byte interpretation from creating false qualifying control values
-3. prevent invalid measurement windows from being treated as nominal samples
-4. prevent historical `real_beacon_skip` values from acting as fresh control evidence
-5. allow a new baseline to survive long enough to obtain a fresh measurement
-6. preserve legitimate recovery when a new valid measurement genuinely qualifies
-7. preserve unrelated WLAN power-management behavior
-8. preserve normal connectivity and thermostat operation
+Unlike the earlier Patch A, C-C does **not** simply disable Beacon Recovery.
 
 Conceptually:
 
 ```text
-invalid measurement window
-        ↓
-re-establish baseline
-        ↓
-wait for fresh comparable measurement
-        ↓
-calculate fresh result
-        ↓
-healthy result ───────────→ continue normally
-        │
-        └── genuine fault → Beacon Recovery
+fresh + valid + qualifying measurement
+        |
+        +---- yes -> Recovery
+        |
+        +---- no  -> continue normally
 ```
 
-The current Patch C-C candidate has completed static pre-build qualification.
+C-C has now been tested on physical hardware.
 
-No known static blocker was identified in the bounded independent review. The modified instruction ranges, control flow, helper code, interrupt-mask handling, baseline invalidation logic, and preservation of legitimate fresh Beacon Recovery were independently checked.
+Testing confirms that:
 
-This result justifies the next research phase: creation and independent verification of an experimental firmware build for controlled hardware A/B testing.
+- normal WLAN remains operational
+- cloud connectivity remains operational
+- thermostat and valve operation remain available
+- beacon statistics continue operating
+- the known stale self-sustaining loop is removed
+- fresh qualifying Recovery can still occur
 
-It does **not** establish runtime correctness, battery-life improvement, or a production-ready fix. Physical sample timing, external PM transaction behavior, IRQ latency, bootloader/OTA acceptance, and long-term measurement availability under policy or connection churn still require hardware qualification.
+Current C-C-based configurations have shown fresh Recovery rates around:
 
-Patch C-C therefore remains an experimental research candidate and is not a released or hardware-qualified patch.
+```text
+~27–30 events/hour
+```
+
+during parts of the runtime tests.
+
+The remaining fresh trigger is still under investigation.
 
 ---
 
-# WUP / EM2 Sleep-Resource Handling
+# 9. WF200 `PS_MODE_ERROR` Is Not Required
 
-A separate low-level WLAN power-management path remains under investigation.
-
-The normal sleep transition approximately performs:
+A separate D3 observer was built to monitor the known WF200:
 
 ```text
-acquire WLAN wake resource
-        ↓
-configure WF200 power mode
-        ↓
-final device-sleep operation
-        ↓
-release wake / EM2 blocking resource
+PS_MODE_ERROR
 ```
 
-If the final low-level sleep operation fails, the release path may not be reached.
+indication.
 
-This can leave a WLAN-owned wake / EM2-blocking resource retained.
+On one long-term observer run:
 
-However:
+```text
+uptime:
+~63.9 h
 
-- the fundamental path already exists in firmware 2.1.0
-- the resource is reference-counted
-- later firmware may reach or prolong the condition differently
-- its frequency in real operation has not been established
+Beacon Recovery counter:
+3835
 
-Therefore it cannot currently explain the historical battery-runtime boundary by itself.
+D3_total:
+0
+```
 
-No patch is currently justified that blindly releases this resource.
+Thousands of host Beacon Recovery events therefore occurred without a recorded D3 `PS_MODE_ERROR`.
 
-WUP / EM2 handling remains a **separate research topic** and is not the current Patch C.
+This does not prove that the radio was always physically sleeping correctly.
+
+It does establish that this known WF200 error indication is not required for the observed host Recovery behavior.
 
 ---
 
-# Desired Beacon Skip
+# 10. Host Power-Management Defects
 
-During normal connected operation, firmware 2.2.4 configures WF200 Fast Power Save with a desired beacon-skip value derived from RSSI.
+The investigation later expanded beyond Beacon Recovery.
 
-Observed mapping:
+Reverse engineering of the host WLAN power-management lifecycle identified several additional correctness problems involving:
 
-```text
-RSSI >= -69 dBm       desired skip = 20
+- Final-Sleep failure cleanup
+- Wake failure handling
+- timeout versus cancellation
+- late completions
+- requested versus committed PM state
+- old PM completion races
+- independent inhibit ownership
+- PM settlement and handoff
 
-RSSI -70 .. -79 dBm   desired skip = 15
+These problems affect the relationship between host software state, lower-level WLAN operations and host sleep restrictions.
 
-RSSI < -79 dBm        desired skip = 10
-```
-
-These are requested power-save parameters.
-
-They should not be confused with the calculated diagnostic `real_beacon_skip`.
-
-The current Beacon Recovery logic also does not simply compare:
-
-```text
-real_beacon_skip
-```
-
-against:
-
-```text
-desired_beacon_skip
-```
-
-Poor RSSI alone therefore does not explain the observed recurring recovery cycle.
+They are separate from C1a/C1b/C2.
 
 ---
 
-# Firmware Evolution
+# 11. A1
 
-The cross-version comparison shows that WLAN behavior evolved substantially across the investigated firmware generations.
+A1 is the experimental correction for the qualified PM lifecycle and ownership defects.
 
-## 2.1.0 → 2.1.3
-
-Relevant changes include:
+It addresses the project defect classes:
 
 ```text
-2.1.0
-  ↓
-2.1.3
-  ├─ periodic connected mDNS restart
-  ├─ state-5 / psovrd2 mechanism
-  ├─ named active power-save override
-  ├─ wake ACK timing change
-  └─ event-handling changes
+G01
+G02
+G03
+G05
+G06
+G18
+G19
 ```
 
-The periodic mDNS restart is the strongest confirmed new recurring connected workload identified in this transition.
+A1 does not blindly clear sleep blockers.
 
-## 2.1.3 → 2.1.8
+Instead, it preserves the reconstructed ownership and settlement model and corrects the identified failure paths.
 
-Relevant changes include:
+The final integration passed extensive static qualification, including:
 
-- additional post-association PM sequencing
-- updated FMAC generation
-- updated protected WF200 firmware
-- additional network behavior changes
+```text
+36 / 36 canonical behavior/control scenarios
+```
 
-No single new unconditional host-side sleep-lock leak was identified.
+plus malformed and corruption tests.
 
-## 2.1.8 → 2.2.4
+The final build contains:
 
-Firmware 2.2.4 adds or expands:
+```text
+93 hooks
+210 relocations
+```
 
-- WF200 statistics
-- beacon receive counters
-- `real_beacon_skip`
-- Beacon Recovery
-- PM retry/locking behavior
-- newer FMAC/WF200 components
+with zero unexplained application changes in the final reconstruction.
 
-The Beacon Recovery mechanism investigated in this repository is specific to the later 2.2.4 control flow and therefore cannot explain all battery drain historically observed on 2.1.8.
+A1 has also been exercised on physical hardware as part of the integrated A1+C-C+WF200 3.18.0 firmware.
 
 ---
 
-# Experimental Patch Matrix
+# 12. WF200 3.18.0
 
-| Configuration | Periodic mDNS | Beacon Recovery | Purpose |
-|---|---:|---:|---|
-| Stock 2.2.4 | active | active when qualifying | control |
-| Patch A | active | bypassed | isolate Beacon Recovery |
-| Patch B | bypassed | active | isolate periodic mDNS |
-| Patch A+B | bypassed | bypassed | combined workload experiment |
-| Patch C-C | preserved | corrected behavior intended | static pre-build qualification passed; hardware testing pending |
+Stock firmware 2.2.4 uses:
 
-Patch A and Patch B are experimental research modifications.
+```text
+Shelly FMAC:
+3.7.0
 
-Patch C is not yet a hardware-qualified release.
+WF200 firmware:
+3.16.1
+```
+
+Silicon Labs later released:
+
+```text
+WF200 3.18.0
+```
+
+The corresponding changelog contains a relevant fix described as:
+
+```text
+device not sleeping after power-save mode change
+```
+
+The official SEC image tested by this project has:
+
+```text
+Size:
+312,400 bytes
+
+SHA-256:
+886d009b3852cb41f7c67c85de5c9bf2e6d67614e10d668b4fa1e18734078cb9
+```
+
+The newer radio firmware was integrated experimentally without replacing Shelly's FMAC 3.7.0 host driver.
+
+Physical testing confirmed successful:
+
+```text
+WF200 initialization
+scan
+association
+DHCP
+cloud connectivity
+power-save operation
+normal TRV operation
+```
+
+This establishes practical interoperability under the tested conditions.
+
+It does **not** establish that WF200 3.18.0 alone fixes the historical battery-drain problem.
 
 ---
 
-# Long-Term Battery Testing
+# 13. A1 + C-C + WF200 3.18.0
 
-Long-term battery logging is being performed across multiple physical SHTRV-01 devices.
+The current integrated experimental correction platform combines:
 
-The logger records approximately every 30 minutes.
+```text
+A1
+    host PM lifecycle / ownership correction
 
-Collected values include, where available:
+C-C
+    Beacon Recovery validity correction
+
+WF200 3.18.0
+    newer Silicon Labs radio firmware
+```
+
+The controlled-test artifact was:
+
+```text
+SHTRV-01_2.2.4_A1_C-C_WF200_3.18.0_EXPERIMENTAL.gbl
+```
+
+GBL:
+
+```text
+Size:
+1,123,380 bytes
+
+SHA-256:
+d91adb9138a528c090210f9a1776565fcfb55b17b2af7d8d46c83d8d1204e379
+
+END CRC32:
+F01262BC
+
+whole-file CRC32 residue:
+2144DF1C
+```
+
+Application:
+
+```text
+Size:
+1,066,544 bytes
+
+SHA-256:
+0bb530cfda66b4c45ada8d864d623ff4f952405a4da0f8f00f368a9f6116030d
+```
+
+The artifact successfully installed through OTA and booted on physical hardware.
+
+The device successfully initialized:
+
+```text
+FMAC 3.7.0
++
+WF200 3.18.0
+```
+
+and continued normal WLAN, cloud, thermostat and valve operation.
+
+Long-term testing is ongoing.
+
+---
+
+# 14. Fresh Recovery Still Exists
+
+The integrated A1+C-C+WF200 3.18.0 device continues to show fresh qualifying Beacon Recovery events.
+
+One representative long-term period produced approximately:
+
+```text
+27–28 events/hour
+```
+
+This is important because C-C has already removed the known stale-evidence recurrence.
+
+The remaining events therefore represent a different question:
+
+> Why does the host still occasionally obtain a fresh measurement that qualifies for Recovery?
+
+Disabling FRITZ!Box Mesh/Band Steering did not eliminate this behavior in the current test.
+
+The remaining trigger is still being investigated.
+
+---
+
+# 15. EFM32GG11 Host Sleep
+
+The Shelly TRV Gen1 host MCU is an:
+
+```text
+EFM32GG11
+```
+
+A focused host-sleep audit reconstructed the native idle selection.
+
+The relevant policy is approximately:
+
+```text
+B2 != 0
+    -> maximum EM1
+
+B2 == 0 && B3 != 0
+    -> EM2
+
+B2 == 0 && B3 == 0
+    -> EM3
+```
+
+A permanent B3 contribution is installed during normal startup.
+
+This means the intended deepest normal idle state is:
+
+```text
+EM2
+```
+
+not EM3.
+
+---
+
+# 16. Why EM3 Is Not the Fix
+
+The permanent B3 contribution initially looked suspicious because it prevents normal idle from reaching EM3.
+
+Further analysis showed that this behavior has a real technical reason.
+
+The stock TRV configures its RTC/tickless scheduler timebase from the:
+
+```text
+LFXO
+```
+
+The EM3 path disables:
+
+```text
+LFXO
+LFRCO
+```
+
+while EM2 retains the required low-frequency clock.
+
+Simply clearing B3 and allowing EM3 would therefore break the assumptions of the current scheduler/tickless implementation.
+
+The project does **not** consider the permanent B3 contribution a battery-drain bug.
+
+The intended target is correct EM2 entry.
+
+---
+
+# 17. Shared B2 Reference-Counter Defect
+
+The host uses B2 as a shared reference counter for software components that require EM1.
+
+For example:
+
+```text
+B2 = 0
+    no owner requires EM1
+
+B2 = 1
+    one owner requires EM1
+
+B2 = 2
+    two simultaneous owners require EM1
+```
+
+This is intentional.
+
+The defect is that not all B2 read-modify-write operations are serialized.
+
+Some task-side paths can be preempted between the load and store while other B2/O operations use a protected critical section.
+
+This creates a real lost-update race.
+
+---
+
+# 18. Phantom B2 Contribution
+
+One verified native schedule can produce:
+
+```text
+B2 = 1
+
+Task A:
+    load B2 = 1
+
+        ↓ preemption
+
+Task B:
+    protected release
+    B2 1 -> 0
+
+        ↓ resume
+
+Task A:
+    store stale 1 + 1
+    B2 = 2
+```
+
+Only one real owner remains.
+
+When that owner later releases:
+
+```text
+B2 2 -> 1
+```
+
+the host is left with:
+
+```text
+B2 = 1
+```
+
+and no legitimate owner.
+
+The normal sleep selector then limits idle to:
+
+```text
+EM1
+```
+
+instead of:
+
+```text
+EM2
+```
+
+A phantom B2 contribution could therefore create persistent excess host awake power until another event repairs the count or the device resets.
+
+Whether this occurs frequently on physical draining devices is not yet established.
+
+---
+
+# 19. Lost B2 Contribution
+
+The opposite race is also possible.
+
+Two real owners can be active while the shared counter contains only:
+
+```text
+B2 = 1
+```
+
+instead of:
+
+```text
+B2 = 2
+```
+
+When one owner releases, B2 can reach zero while the other owner is still active.
+
+The host may then permit EM2 even though one subsystem still requires EM1.
+
+The defect therefore affects correctness in both directions.
+
+This is a demonstrated firmware concurrency defect.
+
+Its field occurrence rate and battery impact remain to be measured.
+
+---
+
+# 20. PA8 WLAN Sleep Gate
+
+Host sleep contains another mechanism independent of B2.
+
+PA8 belongs to the WLAN host-notification path.
+
+Immediately before low-power entry, the host checks PA8.
+
+If PA8 is HIGH:
+
+```text
+WFI is vetoed
+```
+
+Conceptually:
+
+```text
+sleep selected
+      |
+      v
+PA8?
+      |
+      +-- LOW  -> WFI
+      |
+      +-- HIGH -> return without WFI
+```
+
+This is not automatically a bug.
+
+The mechanism appears intended to prevent host sleep while the WLAN interface has pending work.
+
+The open question is whether PA8 repeatedly or persistently prevents WFI during a battery-drain episode.
+
+---
+
+# 21. Stock Host Observer
+
+The next diagnostic firmware is intentionally based on clean stock 2.2.4.
+
+It should preserve:
+
+```text
+stock Beacon Recovery
+stock PM lifecycle
+stock B2/B3 accounting
+stock Final-Sleep
+stock PA8 handling
+stock WF200 3.16.1
+```
+
+and add only passive instrumentation.
+
+The observer is intended to measure:
+
+- current B2/B3/O state
+- B2 acquire/release activity
+- owner-specific B2 activity
+- shadow ownership
+- B2 mismatch
+- EM1 entry count
+- EM2 entry count
+- WFI attempts
+- PA8 veto count
+- first-fault state
+- recent relevant events
+
+The observer must **not** serialize or repair the stock B2 race.
+
+That noninterference requirement is part of its qualification.
+
+---
+
+# 22. Observer Status
+
+A working Stock Host Observer application has been constructed.
+
+Initial independent checks confirmed preservation of:
+
+```text
+stock B2 helpers
+stock sleep selector
+permanent B3 contribution
+stock WF200 payload
+```
+
+and initial observer bookkeeping tests have passed.
+
+However, the observer is **not yet qualified for device testing**.
+
+Remaining qualification includes:
+
+- emitted Thumb wrapper execution
+- register/flags/LR/SP preservation
+- PRIMASK behavior
+- race-window preservation
+- status serialization
+- stack/headroom analysis
+- RAM lifetime
+- final GBL reconstruction
+- deterministic construction
+
+The final qualification verdict must be either:
+
+```text
+STOCK HOST OBSERVER QUALIFIED FOR CONTROLLED DEVICE TEST
+```
+
+or:
+
+```text
+NO-GO
+```
+
+No intermediate observer build should be treated as qualified firmware.
+
+---
+
+# 23. Experimental Firmware Overview
+
+| Variant | Purpose | Status |
+|---|---|---|
+| Stock 2.2.4 | reference | hardware |
+| Patch A | bypass Beacon Recovery | historical hardware-tested isolation |
+| Patch B | suppress periodic mDNS restart | hardware-tested isolation |
+| Patch A+B | combined isolation | historical hardware-tested experiment |
+| C-C | correct C1a/C1b/C2 | hardware tested |
+| D3 Observer | observe WF200 `PS_MODE_ERROR` | hardware tested |
+| WF200 3.18.0 | newer radio PM firmware | hardware tested |
+| C-C + WF200 3.18.0 | Recovery correction + newer radio | hardware tested |
+| A1 | PM lifecycle correction | qualified and hardware tested in integrated build |
+| A1 + C-C + WF200 3.18.0 | integrated correction platform | hardware testing ongoing |
+| Stock Host Observer | observe B2/PA8/EM1/EM2 | qualification in progress |
+
+Detailed patch information is maintained in:
+
+[`docs/patch/README.md`](docs/patch/README.md)
+
+---
+
+# 24. Firmware Versions Investigated
+
+| Firmware | Build | Role |
+|---|---|---|
+| 2.1.0 | `20211223-144805/v2.1.0@d30148ec` | older reference |
+| 2.1.3 | `20220202-080736/v2.1.3@d255ad74` | early comparison |
+| 2.1.8 | `20220811-152343/v2.1.8@5afc928c` | later comparison |
+| 2.2.4 | `20240619-130912/v2.2.4@ee290818` | primary RE target |
+
+Relevant WLAN component evolution:
+
+| Host firmware | FMAC | WF200 |
+|---|---:|---:|
+| 2.1.0 | 3.3.2 | 3.12.2 |
+| 2.1.3 | 3.3.2 | 3.12.2 |
+| 2.1.8 | 3.4.1 | 3.14.0 |
+| 2.2.4 | 3.7.0 | 3.16.1 |
+| experimental 2.2.4 | 3.7.0 | 3.18.0 |
+
+The exact firmware release in which the historical battery-runtime degradation first appeared remains unknown.
+
+---
+
+# 25. Current Device Roles
+
+The physical test devices are reused as the investigation progresses.
+
+The firmware configuration at the time of a dataset is therefore more important than the device suffix itself.
+
+Current or recent important roles include:
+
+| Device | Configuration | Role |
+|---|---|---|
+| `.11` | 2.2.4 D3 observer / WF200 3.16.1 | D3 comparison |
+| `.77` | 2.2.4 + Patch B | completed mDNS-isolation discharge test |
+| `.88` | 2.2.4 + C-C / WF200 3.16.1 | C-C long-term reference |
+| `.229` | stock 2.2.4 | stock reference |
+| `.234` | A1 + C-C + WF200 3.18.0 | integrated correction canary |
+| `.237` | C-C + WF200 3.18.0 | combined reference |
+
+Additional devices are used for historical and secondary comparisons.
+
+Datasets crossing a firmware transition must be split at that transition.
+
+---
+
+# 26. Long-Term Battery Testing
+
+A dedicated logger collects runtime data from multiple physical TRVs.
+
+The normal interval is approximately:
+
+```text
+30 minutes
+```
+
+Collected fields include, where available:
 
 - firmware version
 - battery percentage
 - battery voltage
 - uptime
+- reboot counter
+- reconnect counter
 - RSSI
 - desired beacon skip
 - real beacon skip
-- beacon receive statistics
 - Beacon Recovery counter
+- beacon receive statistics
+- missed beacon statistics
+- multicast activity
+- transmit failures
+- sleep-related statistics
+- valve/motor state
 
 Daily reports are generated for longer-term comparison.
 
-Battery voltage is treated as a stronger short-term indicator than the reported battery percentage, but neither represents a direct electrical energy measurement.
+Battery voltage is generally more useful than reported percentage for short-term trend comparison, but neither is a direct measurement of energy consumption.
 
-Valve/motor activity must also be considered because motor movement represents real mechanical work and can materially affect battery behavior.
-
----
-
-# Current Test Roles
-
-The active research setup includes several physical TRVs with different firmware roles.
-
-Important current configurations include:
-
-| Device | Configuration | Role |
-|---|---|---|
-| `.77` | mDNS-only patched firmware; Beacon Recovery unchanged | isolated mDNS experiment |
-| `.226` | Beacon Recovery bypass + mDNS bypass | combined experimental patch |
-| `.229` | stock 2.2.4 | unmodified control/reference |
-
-Additional TRVs are used for comparison and experimental firmware testing.
-
-Device roles can change during the investigation.
-
-Any dataset crossing a firmware transition must therefore be divided at the transition before battery behavior is compared.
+Valve movement must also be considered because it represents significant real mechanical work.
 
 ---
 
-# Battery-Data Interpretation
+# 27. Important `sleep_ratio` Limitation
 
-Cross-device battery comparison requires caution.
-
-Physical devices can differ in:
-
-- battery age
-- battery condition
-- battery calibration
-- initial state of charge
-- temperature
-- valve load
-- motor workload
-- WLAN conditions
-- RSSI
-- previous operating history
-
-Battery percentage is quantized and should not be treated as a precise energy measurement.
-
-Battery voltage is more useful for observing trends, but it is also affected by:
-
-- instantaneous load
-- battery chemistry
-- relaxation after charging
-- temperature
-- recent motor activity
-
-Therefore:
+Firmware 2.2.4 exposes:
 
 ```text
-Device A lost X mV
-Device B lost Y mV
+sleep_ratio
 ```
 
-does not by itself establish an exact difference in energy consumption.
+through `/stats`.
 
-Longer observation periods, repeated behavior, and controlled comparisons are required.
+Reverse engineering of the corresponding calculation shows that this value represents tickless timing/compensation behavior.
 
----
-
-# Current Scientific Interpretation
-
-The available evidence currently supports a multi-mechanism model.
-
-At minimum, the investigation has identified:
+It is **not** a direct measurement of:
 
 ```text
-normal TRV workload
-        +
-periodic mDNS workload
-        +
-firmware-specific WLAN power management
-        +
-2.2.4 Beacon Recovery behavior
-        +
-possible conditional sleep-resource retention
-        +
-normal valve/motor activity
-        +
-cloud/network communication
-        +
-radio conditions
+physical EFM32GG11 sleep residency
 ```
 
-This remains a qualitative model.
+and it is not a direct measurement of:
 
-It is **not** a quantitative energy budget.
+```text
+WF200 sleep residency
+```
 
-The relative contribution of each component remains unknown.
+It must therefore not be interpreted as:
 
-The Beacon Recovery investigation has, however, progressed beyond identifying only an additional workload.
+```text
+percentage of time physically asleep
+```
 
-The stock 2.2.4 host control flow now contains identifiable measurement and control-validity problems that can explain how recurring recovery can become self-sustaining after an initial qualifying event.
-
-That does not establish how much of the historical battery drain is caused by this mechanism.
-
----
-
-# What Has Been Established
-
-### Periodic mDNS is a real recurring workload
-
-Runtime packet capture confirms periodic mDNS probing/announcement behavior in later firmware.
-
-### Beacon Recovery is a real recurring workload
-
-Affected stock 2.2.4 devices can enter recovery approximately once per minute for extended periods.
-
-### Good RSSI does not prevent the observed recovery loop
-
-Recurring recovery has been observed around `-58` to `-60 dBm`.
-
-### Periodic mDNS is not required for the observed recovery loop
-
-The isolated mDNS-patched device continued Beacon Recovery.
-
-### Patch A suppresses Beacon Recovery
-
-The underlying statistics continue operating.
-
-### Patch B suppresses the targeted periodic mDNS restart
-
-Event-driven mDNS behavior is not intentionally removed.
-
-### Patch A+B operates on real hardware
-
-Both targeted recurring mechanisms can be suppressed simultaneously while normal observed TRV functionality remains available.
-
-### Stock Beacon Recovery contains a stale-control-evidence loop
-
-A qualifying cached `real_beacon_skip` value can be reused after recovery without a fresh ratio calculation.
-
-### Stock Beacon Recovery contains a signed-value control problem
-
-Positive calculated values can become negative after 8-bit signed interpretation and incorrectly satisfy the recovery predicate.
-
-### The measurement window is not explicitly normalized
-
-A fixed numerator is used even when the previous counter baseline can survive skipped measurement opportunities.
+The Stock Host Observer is intended to provide more direct information about actual host low-power entry decisions.
 
 ---
 
-# What Has NOT Been Established
+# 28. Current Battery-Drain Model
+
+The available evidence supports a multi-mechanism model.
+
+Potentially relevant layers include:
+
+```text
+normal thermostat / valve workload
+        |
+        +-- network / cloud traffic
+        |
+        +-- periodic mDNS
+        |
+        +-- Beacon Recovery
+        |
+        +-- host PM lifecycle
+        |
+        +-- B2 blocker accounting
+        |
+        +-- PA8 WLAN sleep veto
+        |
+        +-- WF200 power-save behavior
+        |
+        +-- AP / RF environment
+```
+
+Several of these now contain demonstrated firmware defects.
+
+That still does not establish their quantitative energy contribution.
+
+A code defect can exist without being the dominant battery consumer.
+
+Likewise, a high-frequency workload can consume energy without being the original root cause.
+
+---
+
+# 29. What Has Been Established
+
+The investigation currently supports the following technical conclusions:
+
+- periodic connected mDNS activity is a real recurring workload in later firmware
+- Patch B suppresses the targeted periodic restart
+- periodic mDNS is not required for recurring Beacon Recovery
+- 2.2.4 contains a real Beacon Recovery mechanism
+- good RSSI does not prevent the observed recurring Recovery behavior
+- `real_beacon_skip` is a host-derived estimator, not direct physical beacon-skip state
+- C1a changes valid positive estimator values through signed interpretation
+- C1b allows a counter delta to represent a longer window than the fixed formula assumes
+- C2 can reuse historical Recovery evidence without a fresh calculation
+- C-C corrects these validity problems while retaining fresh Recovery
+- fresh Recovery still occurs after C-C
+- known D3 `PS_MODE_ERROR` is not required for host Beacon Recovery
+- multiple host PM lifecycle/ownership defects exist
+- A1 corrects the qualified PM lifecycle defect set
+- FMAC 3.7.0 can operate with the tested WF200 3.18.0 integration
+- the permanent B3 contribution has a valid RTC/LFXO reason
+- intended normal deepest host idle is EM2
+- shared B2 blocker accounting contains a real task-preemption race
+- the B2 race can produce either phantom or lost ownership
+- PA8 can independently veto WFI
+- A1 does not correct the global B2 RMW race
+- the integrated A1+C-C+WF200 3.18.0 firmware boots and operates on physical hardware
+
+---
+
+# 30. What Has Not Been Established
 
 The project does **not** currently claim:
 
-- that the complete historical battery-drain problem has been solved
+- that one single mechanism explains all historical battery drain
 - that Beacon Recovery is the sole cause
 - that periodic mDNS is the sole cause
-- that Patch A+B restores a specific battery lifetime
-- that firmware 2.1.8 introduced the original problem
-- that firmware 2.1.3 is battery-drain free
-- that firmware 2.1.0 never emits mDNS
-- that the WUP / EM2 path is responsible for the observed historical regression
-- that the exact first Beacon Recovery trigger on the affected physical devices has been captured
-- that Patch C-C has completed hardware qualification
-- that Patch C-C has demonstrated a battery-life improvement on hardware
-- that any current patch is production firmware
+- that WF200 3.18.0 alone fixes the problem
+- that C-C alone fixes the problem
+- that A1 alone fixes the problem
+- that the integrated firmware is a final production fix
+- that every fresh Beacon Recovery event is erroneous
+- that B2 corruption has already been observed on physical hardware
+- that PA8 is defective
+- that EM3 should be enabled
+- that `/stats sleep_ratio` represents physical sleep residency
+- that the exact energy contribution of each mechanism is known
+- that a specific final battery lifetime has been restored
+
+The project currently has no direct electrical current measurements.
 
 ---
 
-# Current Research Direction
+# 31. Current Research Direction
 
-The current work has two parallel goals.
+The immediate priority is the host-sleep observer.
 
-## 1. Long-Term Battery Comparison
-
-Continue controlled logging of stock and experimental firmware configurations.
-
-Primary measurements include:
-
-- battery voltage
-- reported battery percentage
-- uptime
-- RSSI
-- Beacon Recovery statistics
-- unexpected reboots
-- valve/motor activity
-- firmware configuration
-
-The objective is to determine whether removing specific recurring workloads produces a reproducible improvement in real battery behavior.
-
-## 2. Correct Beacon Recovery Instead of Disabling It
-
-Patch A demonstrated that Beacon Recovery can be bypassed.
-
-The current objective is more demanding:
-
-> Preserve legitimate Beacon Recovery while correcting the conditions that allow invalid or historical measurements to trigger it.
-
-The current C-C candidate has completed the first two qualification stages:
+The sequence is:
 
 ```text
-static reverse engineering                 completed
-        ↓
-counterexample / falsification review      completed
-        ↓
-experimental build                         next
-        ↓
-independent binary / GBL verification
-        ↓
-controlled hardware A/B test
-        ↓
-long-term battery test
+Stock 2.2.4
+    |
+    v
+passive Host Observer
+    |
+    v
+measure B2 / PA8 / EM1 / EM2
+    |
+    +-- no B2 corruption observed
+    |       |
+    |       +-- continue investigation
+    |
+    +-- B2 corruption observed
+            |
+            v
+    bounded B2 serialization fix
+            |
+            v
+    observer A/B comparison
+            |
+            v
+    integrate qualified fix into
+    A1 + C-C + WF200 3.18.0
 ```
 
-No known static blocker remains in the reviewed C-C design. The next step is therefore to create the experimental firmware artifact using a growth-aware GBL build process, then independently reparse and verify the resulting container before any hardware flashing is considered.
+In parallel:
 
-Passing static qualification does **not** establish runtime correctness or battery-life improvement. Those claims require controlled hardware testing and long-term observation.
+- continue long-term A1+C-C+WF200 3.18.0 testing
+- continue C-C reference testing
+- compare cloud-on/cloud-off behavior
+- continue WLAN/AP isolation tests
+- investigate the remaining fresh Beacon Recovery trigger
+
+The goal is not to remove every source of WLAN activity.
+
+The goal is to correct demonstrated firmware defects while preserving legitimate power-management and reliability behavior.
 
 ---
 
-# Documentation
+# 32. Repository Structure
 
-Detailed research documentation is maintained under `docs/`.
-
-Public documentation contains reviewed findings, methodology, and reproducible technical results.
-
-Typical structure:
+Public documentation is organized under:
 
 ```text
 docs/
@@ -940,99 +1243,270 @@ docs/
 └── testing/
 ```
 
-Internal working notes, temporary reverse-engineering reports, unreviewed analysis output, and local development material are intentionally kept outside the public repository history.
+Important documents include:
 
-The repository is intended to publish **research results**, not every intermediate analysis artifact.
+### Firmware patches
+
+[`docs/patch/README.md`](docs/patch/README.md)
+
+### Firmware chronology
+
+[`docs/reverse-engineering/firmware-comparison.md`](docs/reverse-engineering/firmware-comparison.md)
+
+### Beacon counter
+
+[`docs/reverse-engineering/beacon-rx-counter.md`](docs/reverse-engineering/beacon-rx-counter.md)
+
+### `real_beacon_skip`
+
+[`docs/reverse-engineering/real-beacon-skip.md`](docs/reverse-engineering/real-beacon-skip.md)
+
+### Beacon Recovery
+
+[`docs/reverse-engineering/recovery-mechanism.md`](docs/reverse-engineering/recovery-mechanism.md)
+
+### Host power management and sleep
+
+[`docs/reverse-engineering/power-management-and-sleep.md`](docs/reverse-engineering/power-management-and-sleep.md)
+
+### AP selection and roaming
+
+[`docs/reverse-engineering/ap-selection-and-roaming.md`](docs/reverse-engineering/ap-selection-and-roaming.md)
+
+### Periodic mDNS
+
+[`docs/reverse-engineering/mdns-periodic-restart.md`](docs/reverse-engineering/mdns-periodic-restart.md)
+
+### mDNS runtime comparison
+
+[`docs/testing/mdns-runtime-comparison.md`](docs/testing/mdns-runtime-comparison.md)
+
+### Battery testing
+
+[`docs/testing/battery-testing.md`](docs/testing/battery-testing.md)
 
 ---
 
-# Firmware Patcher
+# 33. Firmware Patching
 
-A separate repository contains tooling for locally applying the currently released experimental firmware modifications:
+Experimental firmware is generated locally from verified stock firmware.
 
+The public project does **not** distribute original or modified Shelly firmware binaries.
+
+Patch/construction tooling uses fail-closed validation and should verify, as appropriate:
+
+- exact supported source firmware
+- source hashes
+- source size
+- expected native bytes
+- hook addresses
+- container geometry
+- radio payload identity
+- relocation assumptions
+- output CRCs
+- reconstructed application
+- deterministic output
+
+A failed precondition should stop the build.
+
+It should never silently adapt offsets to an unknown firmware image.
+
+---
+
+# 34. Firmware Patcher Repository
+
+A separate patcher repository is available for the public locally applied patch workflow:
+
+```text
 https://github.com/AbleMonster/Shelly-TRV-Gen1-2.2.4-patcher
+```
 
-The current experimental patcher applies the previously developed Patch A + Patch B combination.
+The patcher requires the user to provide their own legitimately obtained supported firmware.
 
-The patcher uses fail-closed validation and verifies the supported input before modification.
+No Shelly firmware is distributed by the project.
 
-It does **not** distribute Shelly firmware.
+The research repository may also contain construction and verification scripts used during development of newer experimental patches.
 
-Users must provide their own legitimately obtained supported firmware image.
+A research script being public does not mean the corresponding experimental firmware has completed hardware qualification.
 
-The patched image is generated locally.
-
-Patch C is not part of the released patcher unless and until its implementation has completed the required qualification process.
+Always check the documented status of the specific variant.
 
 ---
 
-# Repository Scope
+# 35. OTA Testing
+
+Experimental GBL images have been installed on controlled devices through the normal Gen1 OTA mechanism.
+
+For the local test environment, the HTTP server must be reachable on:
+
+```text
+TCP port 80
+```
+
+Port 8000 caused OTA retrieval problems.
+
+On macOS, binding a Python HTTP server to port 80 normally requires elevated privileges.
+
+OTA acceptance is not equivalent to firmware qualification.
+
+A build must still pass its relevant static, binary, container and runtime checks.
+
+---
+
+# 36. Repository Scope
 
 This repository is intended to contain:
 
-- reviewed analysis results
+- reviewed reverse-engineering results
 - technical documentation
 - experimental methodology
-- small patch descriptions
-- independently developed research tooling
+- patch descriptions
+- independently developed tooling
+- construction scripts
+- validation tools
 - sanitized runtime results
 - battery-test methodology
 - reproducible findings
 
-It is not intended to redistribute proprietary Shelly firmware.
+It is not intended to redistribute proprietary firmware.
 
 The repository should not contain:
 
 - original Shelly firmware images
 - complete modified Shelly firmware images
 - proprietary extracted application images
-- large raw disassembly dumps
-- unreviewed reverse-engineering output
-- credentials or private device information
+- large raw proprietary disassembly dumps
+- credentials
+- private network identifiers
+- sensitive device information
 
 General principle:
 
-> Publish the results of the analysis, not the disassembled firmware.
+> Publish the analysis, construction method and verification evidence — not Shelly's firmware.
 
 ---
 
-# Contributing
+# 37. Research Method
 
-Contributions are welcome when they improve reproducibility, challenge existing conclusions, provide independent runtime evidence, or identify alternative interpretations.
+The investigation combines:
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting an issue or pull request.
+- native ARM Thumb reverse engineering
+- EFM32GG11 host analysis
+- cross-version firmware comparison
+- control-flow reconstruction
+- WF200 host-interface analysis
+- executable offline verification
+- binary reconstruction
+- deterministic patch construction
+- GBL parsing
+- relocation verification
+- runtime debug logging
+- passive packet capture
+- controlled OTA testing
+- isolated firmware variants
+- long-term battery logging
 
-Research contributions should clearly distinguish:
+Decompiler output is used as supporting information.
 
-- PROVEN
-- STRONGLY SUPPORTED
-- INFERENCE
-- UNKNOWN
-
-Contradicting an existing conclusion is explicitly welcome when supported by reproducible evidence.
+Important control-flow conclusions are checked against native instructions and, where practical, executable behavior.
 
 ---
 
-# Security
+# 38. Research Principle
+
+The project deliberately separates:
+
+```text
+observation
+    |
+    v
+reverse engineering
+    |
+    v
+hypothesis
+    |
+    v
+attempted falsification
+    |
+    v
+controlled modification
+    |
+    v
+static qualification
+    |
+    v
+runtime validation
+    |
+    v
+long-term observation
+```
+
+A plausible firmware mechanism is not treated as a battery-drain cause merely because it exists.
+
+Likewise:
+
+```text
+Patch changes the intended behavior correctly
+```
+
+does not automatically mean:
+
+```text
+Battery drain solved
+```
+
+The objective is to understand why a mechanism exists, determine whether its control logic is valid, preserve legitimate functionality and correct only behavior that the available evidence demonstrates is defective.
+
+---
+
+# 39. Contributing
+
+Contributions are welcome when they:
+
+- improve reproducibility
+- challenge an existing interpretation
+- provide independent runtime evidence
+- identify missed control flow
+- reproduce a firmware defect
+- improve patch verification
+- provide alternative technical explanations
+
+Please read:
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md)
+
+before submitting an issue or pull request.
+
+Contradicting an existing conclusion is welcome when supported by reproducible evidence.
+
+---
+
+# 40. Security
 
 Security-sensitive findings should not be disclosed through a public issue.
 
-See [SECURITY.md](SECURITY.md) for the project's reporting policy and private contact information.
+See:
 
-This project is independent research and is not an official Shelly security or support channel.
+[`SECURITY.md`](SECURITY.md)
+
+for the project's reporting policy.
+
+This repository is an independent research project and is not an official Shelly security or support channel.
 
 ---
 
-# Safety and Experimental Nature
+# 41. Safety and Experimental Nature
 
-All firmware modifications in this project are experimental.
+All modified firmware in this project is experimental.
 
-Modified firmware can potentially:
+Experimental firmware can potentially:
 
 - make a device unreachable
 - cause unexpected WLAN behavior
 - affect battery life
 - affect thermostat operation
+- affect valve operation
+- cause unexpected power-management behavior
 - require recovery or reflashing
 
 Do not deploy experimental firmware where failure could create an unsafe condition.
@@ -1043,72 +1517,43 @@ Testing should only be performed on devices and networks you own or are authoriz
 
 ---
 
-# Research Principle
+# 42. License
 
-This project intentionally separates:
-
-```text
-observation
-    ↓
-reverse engineering
-    ↓
-hypothesis
-    ↓
-falsification
-    ↓
-controlled modification
-    ↓
-runtime validation
-    ↓
-long-term observation
-```
-
-A plausible mechanism is not treated as a proven battery-drain cause merely because it exists in the firmware.
-
-Likewise:
+Original code, scripts, tooling, documentation and other copyrightable material created specifically for this project are licensed under:
 
 ```text
-Patch works
+GPL-3.0-only
 ```
 
-means that the targeted firmware behavior changed as intended.
+unless otherwise stated.
 
-It does **not** automatically mean:
+See:
 
-```text
-Battery drain fixed
-```
+[`LICENSE`](LICENSE)
 
-The objective is not simply to remove activity from the firmware.
-
-The objective is to understand why that activity exists, determine whether its control logic is valid, preserve legitimate functionality, and correct only the behavior that the available evidence demonstrates is defective.
+for the full license terms.
 
 ---
-
-# License
-
-Original code, scripts, tooling, documentation, and other copyrightable material created specifically for this project are licensed under the GNU General Public License v3.0 only (`GPL-3.0-only`), unless otherwise stated.
-
-See [LICENSE](LICENSE) for the full license terms.
 
 ## Third-Party Firmware and Intellectual Property
 
-This license applies only to material for which the contributors to this repository hold the necessary rights.
+The project license applies only to material for which the contributors hold the necessary rights.
 
-Shelly firmware, firmware components, trademarks, product names, and other third-party intellectual property remain the property of their respective owners and are not licensed under the GPL by this project.
+Shelly firmware, Silicon Labs firmware, firmware components, trademarks, product names and other third-party intellectual property remain the property of their respective owners.
 
 This repository does not distribute original or modified Shelly firmware images.
 
-Reverse-engineering documentation, independently developed tools, patch descriptions, offsets, and small technical excerpts are provided for research, interoperability, debugging, and reproducibility purposes.
+Reverse-engineering documentation, independently developed tools, patch descriptions, offsets and small technical excerpts are provided for research, interoperability, debugging and reproducibility.
 
-Users are responsible for obtaining any required firmware from legitimate sources and for complying with applicable licenses and laws.
+Users are responsible for obtaining required firmware from legitimate sources and complying with applicable licenses and laws.
 
 ---
 
-# Project Independence
+# 43. Project Independence
 
-This project is an independent community research effort.
+This is an independent community research project.
 
-It is not affiliated with, sponsored by, or endorsed by Shelly or Shelly Group.
+It is not affiliated with, sponsored by, or endorsed by Shelly Group or Silicon Labs.
 
 Product names and trademarks are used only to identify the devices and firmware being studied.
+````

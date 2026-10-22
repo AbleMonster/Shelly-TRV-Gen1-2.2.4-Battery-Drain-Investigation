@@ -1,154 +1,92 @@
+```markdown
 # mDNS Runtime Comparison
 
 ## Scope
 
-This document records runtime validation of the periodic mDNS behavior identified
-during static reverse engineering of Shelly TRV Gen1 firmware.
+This document records runtime validation of the periodic mDNS behavior identified during reverse engineering of Shelly TRV Gen1 firmware.
 
-The investigation covers:
+The focus here is deliberately narrow:
 
-- firmware 2.1.0
-- firmware 2.1.3
-- firmware 2.2.4 stock
-- firmware 2.2.4 with Patch B
+- packet-capture behavior of different firmware versions
+- observed mDNS cadence
+- runtime validation of Patch B
+- long-term behavior of the Patch-B device
+- separation of periodic mDNS activity from Beacon Recovery
+- what these observations do and do not establish about battery drain
 
-The primary questions are:
+The static implementation of the periodic restart, its callers and the exact Patch-B modification are documented separately in:
 
-1. Is periodic mDNS restart behavior observable at runtime?
-2. How does its cadence differ between firmware versions?
-3. Does Patch B suppress the targeted periodic restart?
-4. Does suppressing the periodic mDNS restart also suppress Beacon Recovery?
-5. What can and cannot be concluded about battery consumption?
+[`../reverse-engineering/mdns-periodic-restart.md`](../reverse-engineering/mdns-periodic-restart.md)
 
-This document describes network behavior.
+This document describes runtime behavior.
 
-It does **not** directly measure electrical current or battery energy.
+It does **not** directly measure electrical current, charge consumption or physical radio sleep residency.
 
 ---
 
-# 1. Evidence Classification
+# 1. Test Matrix
 
-This project uses four evidence levels.
+The relevant runtime configurations are:
 
-## PROVEN
+| Configuration | Periodic mDNS | Beacon Recovery | Purpose |
+|---|---|---|---|
+| 2.1.0 stock | no comparable periodic burst observed | 2.2.4 mechanism absent | older firmware reference |
+| 2.1.3 stock | observed | 2.2.4 mechanism absent | early periodic-mDNS reference |
+| 2.2.4 stock | observed | stock | current stock reference |
+| 2.2.4 + Patch B | targeted periodic restart suppressed | stock | mDNS isolation |
+| 2.2.4 + C-C | unchanged | validity-corrected | Beacon Recovery comparison |
+| 2.2.4 + A1 + C-C | unchanged | validity-corrected | integrated host-PM reference |
 
-Directly established from native firmware instructions, deterministic binary
-comparison, validated control flow, documented interface semantics, or
-sufficiently direct runtime evidence.
+The first four configurations are the main subject of this document.
 
-## STRONGLY SUPPORTED
-
-Multiple independent findings support the conclusion, but some runtime,
-implementation, or environmental detail remains unresolved.
-
-## INFERENCE
-
-A technically plausible interpretation consistent with the available evidence,
-but not directly established.
-
-## UNKNOWN
-
-The available evidence is insufficient to determine the behavior, quantitative
-effect, or original developer intent.
-
-Runtime observations are described explicitly together with their observation
-window.
+C-C and A1 are included only where later runtime results help interpret the relationship between mDNS and Beacon Recovery.
 
 ---
 
-# 2. Static Background
+# 2. Original Packet-Capture Setup
 
-Static firmware analysis identified a recurring connected-maintenance path
-capable of restarting mDNS probing.
+The original cross-version experiment observed three physical Shelly TRV Gen1 devices simultaneously on the same local network.
 
-The relevant high-level behavior is:
+At the time of that capture:
 
-```text
-connected maintenance
-        |
-        v
-mDNS restart path
-        |
-        v
-probing state restarted
-        |
-        v
-mDNS probes
-        |
-        v
-announcement
-```
-
-The chronology differs between firmware generations.
-
-Current reverse-engineering results indicate:
-
-```text
-2.1.0
-mDNS responder exists
-no comparable recurring connected-maintenance caller identified
-
-2.1.3
-recurring connected-maintenance restart identified
-approximately 60-second cadence
-
-2.1.8
-additional gating changes effective cadence
-approximately 180 seconds
-
-2.2.4
-same general gated periodic behavior
-approximately 180 seconds
-```
-
-The runtime experiments described below validate important parts of this model.
-
----
-
-# 3. Original Runtime Test Setup
-
-Three Shelly TRV Gen1 devices were observed simultaneously on the same local
-network.
-
-At the time of this original capture, their roles were:
-
-| Device | Firmware at capture time | Role |
+| Device | Firmware | Role |
 |---|---|---|
-| `.11` | 2.1.0 | older firmware reference |
-| `.77` | 2.1.3 | periodic-mDNS comparison |
-| `.229` | 2.2.4 stock | current stock comparison |
+| `.11` | 2.1.0 stock | older firmware reference |
+| `.77` | 2.1.3 stock | periodic-mDNS comparison |
+| `.229` | 2.2.4 stock | stock 2.2.4 comparison |
 
 Packet capture was performed using TShark on macOS.
 
-The capture filter was equivalent to:
+The capture filter selected UDP port 5353 traffic from the three devices.
+
+Conceptually:
 
 ```text
 udp port 5353 and
 (
-    host 192.168.178.11 or
-    host 192.168.178.77 or
-    host 192.168.178.229
+    host <2.1.0 device> or
+    host <2.1.3 device> or
+    host <2.2.4 device>
 )
 ```
 
-Capture duration was approximately:
+The observation lasted approximately:
 
 ```text
 13 minutes
 ```
 
-No active requests were intentionally sent to the TRVs during the observation.
+No active requests were intentionally sent to the TRVs during this observation.
 
-The device roles listed above describe this historical capture only.
+The purpose was to compare naturally occurring mDNS traffic rather than provoke service discovery manually.
 
-Device IP addresses must not be treated as permanent firmware identities because
-several devices were reflashed later in the investigation.
+Device identifiers in this document describe the firmware state at the time of each experiment. Several devices were reflashed later and must not be treated as permanently associated with one firmware version.
 
 ---
 
-# 4. Firmware 2.1.0 Runtime Result
+# 3. Firmware 2.1.0
 
-Historical device at capture time:
+Historical device:
 
 ```text
 .11
@@ -160,68 +98,46 @@ Firmware:
 2.1.0
 ```
 
-No mDNS packets from this device were observed during the approximately
-13-minute capture.
+During the approximately 13-minute simultaneous capture, no mDNS packets from this device were observed.
 
-This agrees with static analysis:
+The result is consistent with the static firmware comparison:
 
 ```text
 mDNS responder exists
-        |
-        v
-no comparable recurring connected-maintenance restart caller identified
+
+but
+
+no comparable recurring connected-maintenance
+restart was identified in the examined path
 ```
 
-The runtime result must be interpreted narrowly.
+The runtime observation should be interpreted narrowly:
 
-It establishes:
+> No periodic mDNS burst comparable to the later firmware versions was observed from the 2.1.0 device during this approximately 13-minute capture.
 
-> No comparable periodic mDNS burst was observed from the 2.1.0 device during
-> this approximately 13-minute observation window.
+It does not mean that firmware 2.1.0 can never transmit mDNS.
 
-It does **not** establish:
-
-```text
-2.1.0 never transmits mDNS
-```
-
-Event-driven or startup-related mDNS behavior remains possible.
-
-### Classification
-
-No comparable periodic burst during this capture:
-
-**PROVEN**
-
-Firmware 2.1.0 can never emit mDNS:
-
-**UNKNOWN**
-
-Comparable recurring connected-maintenance mDNS restart exists in 2.1.0:
-
-**UNKNOWN; no such caller was identified and no such runtime cadence was
-observed**
+Startup, registration or other event-driven mDNS behavior remains possible.
 
 ---
 
-# 5. Firmware 2.1.3 Runtime Result
+# 4. Firmware 2.1.3
 
-Historical device at capture time:
+Historical device:
 
 ```text
 .77
 ```
 
-Firmware at that time:
+Firmware at the time:
 
 ```text
 2.1.3
 ```
 
-The device repeatedly produced a characteristic mDNS sequence approximately
-once per minute.
+The device repeatedly produced a characteristic mDNS sequence approximately once per minute.
 
-A typical burst consisted of:
+A normal observed burst consisted of:
 
 ```text
 probe
@@ -230,7 +146,7 @@ probe
 announcement
 ```
 
-One observed sequence was approximately:
+One representative sequence was:
 
 ```text
 59.699 s   probe
@@ -242,7 +158,7 @@ One observed sequence was approximately:
 Observed burst starts included approximately:
 
 ```text
-0 s
+0.0 s
 59.7 s
 119.8 s
 179.8 s
@@ -258,52 +174,23 @@ Observed burst starts included approximately:
 779.9 s
 ```
 
-The observed interval was therefore approximately:
+The runtime cadence is therefore approximately:
 
 ```text
 60 seconds
 ```
 
-This closely matches the connected-maintenance behavior identified statically.
+This agrees with the connected-maintenance behavior identified in the corresponding firmware.
 
-Conceptually:
+The important runtime result is simple:
 
-```text
-connected
-    |
-    v
-periodic maintenance
-    |
-    v
-mDNS responder restart
-    |
-    v
-probe sequence
-    |
-    v
-announcement
-```
-
-### Classification
-
-Periodic mDNS bursts occur in the tested 2.1.3 runtime:
-
-**PROVEN**
-
-Observed cadence is approximately 60 seconds:
-
-**PROVEN**
-
-The captured packet sequence is consistent with the statically identified
-restart path:
-
-**STRONGLY SUPPORTED**
+> Firmware 2.1.3 actively restarts the mDNS probing sequence at approximately one-minute intervals under the tested conditions.
 
 ---
 
-# 6. Firmware 2.2.4 Stock Runtime Result
+# 5. Firmware 2.2.4 Stock
 
-Historical stock device:
+Historical reference device:
 
 ```text
 .229
@@ -312,12 +199,10 @@ Historical stock device:
 Firmware:
 
 ```text
-2.2.4
 20240619-130912/v2.2.4@ee290818
 ```
 
-Stock firmware 2.2.4 produced the same characteristic class of mDNS
-probe/announcement activity.
+Stock firmware 2.2.4 produced the same general class of mDNS probe/announcement activity as 2.1.3, but at a lower frequency.
 
 Observed burst starts included:
 
@@ -328,7 +213,7 @@ Observed burst starts included:
 657.413 s
 ```
 
-The resulting intervals were approximately:
+The resulting intervals were:
 
 ```text
 180.225 s
@@ -336,13 +221,13 @@ The resulting intervals were approximately:
 179.921 s
 ```
 
-The observed runtime period was therefore approximately:
+The observed cadence is therefore approximately:
 
 ```text
 180 seconds
 ```
 
-A typical burst again consisted of approximately:
+A normal burst again contained approximately:
 
 ```text
 3 probes
@@ -350,95 +235,104 @@ A typical burst again consisted of approximately:
 1 announcement
 ```
 
-This establishes that the periodic mDNS restart behavior remains present in
-stock 2.2.4.
+The packet capture therefore confirms that the periodic restart remains active in stock firmware 2.2.4.
 
-Its cadence differs from the tested 2.1.3 behavior:
+Its runtime cadence changed from the approximately 60-second behavior observed in 2.1.3 to approximately 180 seconds.
+
+---
+
+# 6. Cross-Version Runtime Comparison
+
+The original capture gives the following direct comparison:
+
+| Firmware | Observed periodic mDNS behavior | Approximate cadence |
+|---|---|---:|
+| 2.1.0 | no comparable periodic burst observed | none observed in ~13 min |
+| 2.1.3 | recurring probe/announcement bursts | ~60 s |
+| 2.2.4 | recurring probe/announcement bursts | ~180 s |
+
+Static comparison adds the intermediate firmware 2.1.8.
+
+The resulting firmware history is:
 
 ```text
+2.1.0
+    |
+    +-- mDNS responder present
+    |
+    +-- no comparable recurring maintenance
+        burst observed in runtime test
+
+
 2.1.3
-~60 s
+    |
+    +-- recurring mDNS restart
+    |
+    +-- ~60 s
+
+
+2.1.8
+    |
+    +-- later modulo-3 scheduling already present
+
 
 2.2.4
-~180 s
+    |
+    +-- recurring mDNS restart
+    |
+    +-- ~180 s confirmed at runtime
 ```
 
-Subsequent static comparison identified gating consistent with the longer
-2.1.8/2.2.4 cadence.
+The approximately 180-second 2.1.8 behavior has not been independently verified with the same dedicated packet-capture experiment.
 
-### Classification
+The important chronology is nevertheless clear:
 
-Periodic mDNS bursts occur in tested stock 2.2.4:
+> Periodic mDNS activity predates firmware 2.2.4.
 
-**PROVEN**
-
-Observed cadence is approximately 180 seconds:
-
-**PROVEN**
-
-The runtime behavior corresponds to the statically identified periodic restart
-mechanism:
-
-**STRONGLY SUPPORTED**
+It was modified over time rather than introduced together with the 2.2.4 Beacon Recovery mechanism.
 
 ---
 
-# 7. Firmware Chronology
+# 7. Patch B
 
-Combining static and runtime evidence gives the following current chronology.
+Patch B was created specifically to isolate the recurring mDNS workload.
 
-| Firmware | Recurring connected mDNS behavior | Runtime cadence |
-|---|---|---:|
-| 2.1.0 | comparable recurring caller not identified | not observed in ~13 min |
-| 2.1.3 | identified | ~60 s |
-| 2.1.8 | identified with later gating | ~180 s expected from static behavior |
-| 2.2.4 | identified with later gating | ~180 s observed |
+It suppresses the targeted connected-maintenance restart while leaving the rest of the mDNS implementation and stock Beacon Recovery intact.
 
-This is important for battery-drain chronology.
-
-The periodic mDNS workload:
+Its purpose is therefore:
 
 ```text
-did not originate in 2.2.4
-```
+periodic mDNS variable
+        |
+        v
+remove targeted recurring restart
 
-It was already present in earlier firmware.
+while
 
-The behavior changed over time rather than appearing for the first time in
-2.2.4.
-
----
-
-# 8. Patch B
-
-Patch B is the experimental mDNS-only modification.
-
-Its purpose is narrow:
-
-```text
-suppress the targeted recurring connected-maintenance mDNS restart
-```
-
-while leaving unrelated mechanisms intact.
-
-Patch B does **not** intentionally modify:
-
-```text
 Beacon Recovery
-RSSI thresholds
-desired_beacon_skip
-AP selection
-prevent_roaming
-normal thermostat behavior
+        |
+        v
+remain stock
 ```
 
-The mDNS responder itself is not intended to be globally disabled.
+Patch B does not intentionally modify:
 
-The modification targets the recurring restart path.
+- Beacon Recovery
+- `real_beacon_skip`
+- `desired_beacon_skip`
+- RSSI thresholds
+- AP selection
+- WLAN power-management policy
+- thermostat operation
+- valve control
+
+The exact native patch and static qualification are documented in:
+
+[`../reverse-engineering/mdns-periodic-restart.md`](../reverse-engineering/mdns-periodic-restart.md)
 
 ---
 
-# 9. Patch-B Runtime Test
+# 8. Patch-B Packet-Capture Test
 
 Device:
 
@@ -446,184 +340,233 @@ Device:
 .77
 ```
 
-Current relevant configuration:
+Relevant configuration during this later experiment:
 
 ```text
-firmware 2.2.4
-Patch B active
-Beacon Recovery stock
+host firmware:
+    2.2.4 + Patch B
+
+periodic mDNS restart:
+    suppressed
+
+Beacon Recovery:
+    stock
 ```
 
-This is different from `.77`'s historical role in the original 2.1.3 capture.
+This is a later configuration than the `.77` 2.1.3 experiment described above.
 
-A later TShark capture filtered for:
-
-```text
-UDP port 5353
-host 192.168.178.77
-```
-
-showed:
+A TShark capture filtered for UDP port 5353 traffic from the Patch-B device produced:
 
 ```text
 0 packets captured
 ```
 
-during a monitored window of at least approximately:
+during an observation window of at least approximately:
 
 ```text
 10 minutes
 ```
 
-A stock 2.2.4 device would normally be expected to produce multiple targeted
-periodic bursts during such a window because its observed cadence is
-approximately:
+A stock 2.2.4 device operating at the measured approximately 180-second cadence would normally be expected to produce several targeted periodic bursts during a window of this length.
 
-```text
-180 seconds
-```
+The result therefore confirms the intended runtime effect:
 
-The absence of the targeted traffic therefore provides strong finite-window
-runtime evidence that Patch B suppresses the intended recurring restart.
+> The recurring mDNS sequence targeted by Patch B was absent during the monitored Patch-B runtime.
 
-This result does not mean:
+This does not mean that all mDNS functionality has been removed.
 
-```text
-all mDNS functionality has been removed
-```
-
-Other event-driven mDNS behavior remains part of the firmware.
-
-### Classification
-
-Targeted periodic mDNS traffic absent during the monitored Patch-B window:
-
-**PROVEN**
-
-Patch B suppresses the targeted recurring restart under the tested conditions:
-
-**STRONGLY SUPPORTED**
-
-All possible mDNS activity is disabled:
-
-**UNKNOWN; this is not the design objective and has not been established**
+Other event-driven responder paths remain present by design.
 
 ---
 
-# 10. Patch B and Normal Connectivity
+# 9. Connectivity with Patch B
 
-During Patch-B testing, normal device operation remained available.
+Normal device operation remained available while the targeted periodic restart was suppressed.
 
 The experiment did not identify a loss of ordinary:
 
 ```text
 Wi-Fi connectivity
+
 local IP access
+
 TRV operation
 ```
 
-caused by suppressing the targeted periodic restart.
+caused by Patch B.
 
-This is important because the periodic restart is not being treated as
-necessary merely because it exists in stock firmware.
+This is useful because it demonstrates that continuously restarting the mDNS probing sequence is not required for ordinary operation during the tested runtime.
 
-However, finite runtime operation cannot establish every possible long-term
-network condition.
+The result should not be generalized into a claim that the periodic restart has no purpose under every possible network condition.
 
-Potential edge cases include:
+Possible edge cases include:
 
 - hostname changes
-- network topology changes
 - reconnects
 - AP restarts
+- network topology changes
 - long uptime
 - unusual multicast conditions
 
-These remain separate qualification questions.
-
-### Classification
-
-Normal operation during the monitored Patch-B test:
-
-**PROVEN**
-
-Patch B is harmless under every possible network condition:
-
-**UNKNOWN**
+Patch B was designed as an isolation experiment rather than as a complete qualification of all mDNS service-discovery behavior.
 
 ---
 
-# 11. Patch B and Beacon Recovery
+# 10. Long-Term Patch-B Test
 
-The Patch-B experiment also provides an important mechanism-separation result.
+The `.77` Patch-B device was subsequently left running for a long-term discharge experiment.
 
-Beacon Recovery remained stock on `.77`.
-
-After Patch B was installed, the device continued to produce the characteristic
-2.2.4 Recovery sequence.
-
-Conceptually:
+Configuration:
 
 ```text
-Patch B
+2.2.4 + Patch B
+
+periodic connected-maintenance mDNS restart:
+    suppressed
+
+Beacon Recovery:
+    stock
+```
+
+At the end of the observed discharge run, the device reported approximately:
+
+```text
+battery:              0 %
+voltage:              3.116 V
+uptime:               ~9.23 days
+reconnect_counter:    30
+desired_beacon_skip:  15
+real_beacon_skip:     1
+beacon_err_counter:   12908
+```
+
+The Beacon Recovery rate over the complete uptime is approximately:
+
+```text
+12908 / (9.23 * 24)
+
+≈ 58.3 recoveries/hour
+```
+
+or approximately:
+
+```text
+one Recovery every 61.8 seconds
+```
+
+on average.
+
+The periodic mDNS restart had been suppressed throughout this experimental configuration.
+
+The long-term result therefore extends the earlier short packet-capture observation:
+
+```text
+periodic mDNS restart
         |
         v
-targeted periodic mDNS restart suppressed
+suppressed
 
-while
 
 Beacon Recovery
         |
         v
-continues
+continues for days
+        |
+        v
+~12908 events
 ```
 
-This establishes that the targeted periodic mDNS restart is not required for
-the observed recurring Beacon Recovery under the tested conditions.
-
-The current `.77` observations are around approximately:
-
-```text
-RSSI
--75 ... -77 dBm
-
-desired_beacon_skip
-15
-```
-
-Older observations involving approximately:
-
-```text
--58 ... -59 dBm
-desired_beacon_skip = 20
-```
-
-must not be attributed to the current `.77` Patch-B role.
-
-Good-RSSI Recovery observations exist separately in the research dataset, but
-device roles must remain distinct.
-
-### Classification
-
-Beacon Recovery continues on the Patch-B device:
-
-**PROVEN**
-
-Targeted periodic mDNS restart is required for the observed recurring Recovery:
-
-**UNKNOWN as a hypothetical requirement; the Patch-B runtime result demonstrates
-that such a requirement is unnecessary under the tested conditions**
-
-Universal independence under every possible state:
-
-**UNKNOWN**
+This is much stronger than a short observation showing only a few Recoveries after Patch B.
 
 ---
 
-# 12. Relationship to C1a, C1b and C2
+# 11. What the `.77` Long-Term Test Establishes
 
-The later Beacon Recovery investigation identified three separate host-side
-validity problems:
+The experiment provides a clear mechanism-separation result.
+
+The following hypothesis is incompatible with the observed runtime behavior:
+
+```text
+periodic mDNS restart is required
+for recurring Beacon Recovery
+```
+
+because recurring Beacon Recovery continued at high frequency after the targeted periodic restart was removed.
+
+The result supports:
+
+> The periodic connected-maintenance mDNS restart is not required for the recurring Beacon Recovery behavior observed on the tested device.
+
+The experiment does **not** establish:
+
+```text
+Beacon Recovery caused the complete battery discharge
+```
+
+and it does not establish:
+
+```text
+mDNS has zero energy cost
+```
+
+The device still contained many other possible energy consumers and power-management mechanisms.
+
+No electrical current was measured.
+
+The final battery state therefore demonstrates that Patch B did not prevent poor long-term battery behavior on this device, but it does not identify which remaining mechanism caused that behavior.
+
+---
+
+# 12. Relationship to Beacon Recovery
+
+The mDNS experiment was originally motivated in part by the possibility that the recurring restart could disturb WLAN timing sufficiently to trigger the 2.2.4 Beacon Recovery path.
+
+A simple version of that hypothesis was:
+
+```text
+periodic mDNS restart
+        |
+        v
+WLAN activity
+        |
+        v
+beacon timing disturbance
+        |
+        v
+real_beacon_skip anomaly
+        |
+        v
+Beacon Recovery
+```
+
+Patch B tests whether the periodic restart is a necessary part of this chain.
+
+Runtime behavior shows:
+
+```text
+periodic mDNS restart
+        |
+        v
+removed
+
+
+Beacon Recovery
+        |
+        v
+still occurs
+```
+
+The targeted periodic mDNS activity therefore cannot be treated as a required trigger for recurring Beacon Recovery.
+
+This does not prove that an individual mDNS transmission can never affect beacon timing.
+
+It establishes the narrower and more useful result that the recurring Recovery behavior does not depend on the periodic restart.
+
+---
+
+# 13. Later Beacon Recovery Findings
+
+Subsequent reverse engineering identified three host-side validity problems in the stock Beacon Recovery control chain:
 
 ```text
 C1a
@@ -636,69 +579,53 @@ C2
 post-Recovery control-evidence freshness
 ```
 
-None of these mechanisms requires the periodic mDNS restart.
+C2 is particularly relevant to the earlier mDNS hypothesis.
 
-In particular, C2 explains how a qualifying cached Recovery value can sustain
-the recurring Recovery cycle without requiring a fresh qualifying measurement
-on every cycle.
+After a qualifying Recovery, stock firmware can clear the beacon-counter baseline while retaining the previously calculated control value.
 
-Therefore:
+The next measurement can therefore establish a new baseline without producing fresh control evidence, while the old value remains available to the Recovery decision.
 
-```text
-periodic mDNS
-```
-
-should not be used as the current explanation for:
+Conceptually:
 
 ```text
-persistent Beacon Recovery
+fresh qualifying value
+        |
+        v
+Recovery
+        |
+        v
+measurement baseline cleared
+        |
+        v
+old control value retained
+        |
+        v
+next sample establishes baseline
+        |
+        v
+old value evaluated again
+        |
+        v
+Recovery can repeat
 ```
 
-The mechanisms remain separate experimental variables.
+A new external disturbance is therefore not required every minute to explain the stock self-sustaining Recovery behavior.
+
+This static result and the Patch-B runtime result agree:
+
+> Periodic mDNS is not needed to explain the recurring stock Recovery loop.
+
+The cause of the initial fresh qualifying measurement remains a separate question.
 
 ---
 
-# 13. Relationship to Patch A
+# 14. Patch C-C Runtime Context
 
-Patch A is the historical Beacon-Recovery bypass.
+Patch C-C was developed to correct the identified Beacon Recovery validity problems while retaining Recovery for fresh qualifying evidence.
 
-Its purpose was to isolate the Recovery workload.
+Unlike the earlier Patch A, C-C does not simply bypass the Recovery action.
 
-Patch A does not correct the underlying C1a/C1b/C2 semantics.
-
-It suppresses the Recovery action itself.
-
-Patch A was therefore useful for mechanism isolation but is no longer the
-preferred candidate for correcting Beacon Recovery.
-
-The historical combined:
-
-```text
-Patch A + Patch B
-```
-
-experiment demonstrated that both targeted recurring mechanisms could be
-suppressed simultaneously while the TRV remained operational during monitored
-runtime.
-
-That experiment remains scientifically useful.
-
-It should not be interpreted as the current preferred final fix.
-
----
-
-# 14. Relationship to Patch C-C
-
-Patch C is the research family intended to correct Beacon Recovery validity
-while preserving legitimate Recovery behavior.
-
-The current preferred implementation candidate is:
-
-```text
-Patch C-C
-```
-
-Patch C-C targets:
+C-C targets:
 
 ```text
 C1a
@@ -706,38 +633,136 @@ C1b
 C2
 ```
 
-and does not intentionally modify the mDNS mechanism.
+while leaving the periodic mDNS mechanism unchanged.
 
-The intended experimental separation is therefore:
+C-C has now been tested on physical TRV hardware.
+
+Relevant configurations include:
 
 ```text
-Patch B
-        |
-        v
-mDNS variable
+.88
+    2.2.4 + C-C
+    WF200 3.16.1
 
 
-Patch C-C
-        |
-        v
-Beacon Recovery validity variable
+.237
+    2.2.4 + C-C
+    WF200 3.18.0
+
+
+.234
+    2.2.4 + A1 + C-C
+    WF200 3.18.0
 ```
 
-This provides a cleaner future experimental matrix than using Patch A as the
-final Recovery modification.
+These tests show an important distinction.
 
-Patch C-C has passed static pre-build qualification.
+C-C removes the invalid/stale recurrence mechanism targeted by the patch, but fresh qualifying Recovery events can still occur.
 
-Hardware runtime qualification remains pending.
+For example, the `.234` A1+C-C+WF200 3.18.0 experiment showed approximately:
+
+```text
+27–28 fresh Recovery events/hour
+```
+
+during part of the long-term test.
+
+A separate `.237` C-C+WF200 3.18.0 reference showed a similar order of magnitude.
+
+The current runtime model therefore distinguishes:
+
+```text
+stock recurring Recovery
+        |
+        +-- invalid/stale recurrence
+        |       |
+        |       +-- corrected by C-C
+        |
+        +-- fresh qualifying measurements
+                |
+                +-- still observed
+```
+
+The remaining fresh Recovery behavior is not explained by the periodic mDNS restart.
 
 ---
 
-# 15. Energy Interpretation
+# 15. D3 Runtime Context
 
-The packet captures establish real additional recurring network activity.
+A separate observer experiment monitored the known WF200 `PS_MODE_ERROR` indication while retaining stock Beacon Recovery.
 
-For stock 2.2.4, approximately every 180 seconds the targeted sequence can
-include:
+On the `.11` D3 observer device, one long-term state was approximately:
+
+```text
+uptime:       63.9 h
+beacon_err:   3835
+D3_total:     0
+```
+
+Thousands of Beacon Recovery events therefore occurred without a recorded D3 `PS_MODE_ERROR`.
+
+This does not establish that the WF200 radio was always physically sleeping correctly.
+
+It does show that the known D3 indication is not required for the host Recovery mechanism.
+
+Together, the runtime isolation results now show:
+
+```text
+periodic mDNS restart
+        not required
+
+
+known D3 PS_MODE_ERROR
+        not required
+
+
+fresh Beacon Recovery
+        still observed
+```
+
+The upstream cause of the remaining fresh qualifying estimator values therefore remains under investigation.
+
+---
+
+# 16. Runtime Comparison Summary
+
+The main runtime observations can be summarized as:
+
+| Configuration | Periodic mDNS | Approximate mDNS cadence | Beacon Recovery |
+|---|---|---:|---|
+| 2.1.0 stock | not observed in original capture | none observed in ~13 min | 2.2.4 mechanism absent |
+| 2.1.3 stock | observed | ~60 s | 2.2.4 mechanism absent |
+| 2.2.4 stock | observed | ~180 s | stock Recovery present |
+| 2.2.4 + Patch B | targeted cycle not observed | suppressed | stock Recovery continues |
+| 2.2.4 + C-C | unchanged | stock mDNS behavior | stale/invalid Recovery corrected; fresh events remain |
+| 2.2.4 + A1 + C-C + WF200 3.18 | unchanged | stock mDNS behavior | fresh events remain |
+
+The Patch-B long-term test adds:
+
+```text
+periodic mDNS suppressed
+
+Beacon Recovery:
+~58.3/hour average
+
+runtime:
+~9.23 days
+
+final battery:
+0 %, 3.116 V
+```
+
+These values describe observed firmware and network behavior.
+
+They are not an electrical-energy ranking.
+
+---
+
+# 17. Energy Interpretation
+
+The packet captures establish that the periodic restart creates real recurring work.
+
+A normal successful stock 2.2.4 sequence can include approximately:
 
 ```text
 3 mDNS probes
@@ -745,55 +770,32 @@ include:
 1 announcement
 ```
 
-This necessarily involves some combination of:
+every approximately:
 
 ```text
-software processing
-packet construction
-radio transmission
-radio receive activity
+180 seconds
 ```
 
-relative to a state where the periodic restart does not occur.
+That necessarily involves some combination of:
 
-However, packet capture does not measure electrical energy.
+- host processing
+- packet construction
+- network-stack processing
+- WLAN transmission
+- WLAN receive activity
+- radio wake or active time
 
-The experiment cannot determine:
+compared with a state in which the periodic sequence does not occur.
 
-- current consumed per burst
-- charge consumed per burst
-- mAh consumed per day
-- percentage of total TRV energy attributable to mDNS
-- resulting battery-life reduction
+The additional energy cost is therefore not expected to be exactly zero.
 
-The correct conclusion is:
-
-> The periodic mDNS restart is a confirmed recurring network workload, but its
-> quantitative contribution to battery drain remains unknown.
-
-### Classification
-
-Periodic mDNS adds recurring network activity:
-
-**PROVEN**
-
-The activity has non-zero energy cost:
-
-**STRONGLY SUPPORTED**
-
-Its quantitative battery impact:
-
-**UNKNOWN**
-
-Periodic mDNS is a major cause of the historical battery drain:
-
-**UNKNOWN**
+However, packet capture cannot determine its magnitude.
 
 ---
 
-# 16. Why Packet Count Is Not Battery Consumption
+# 18. Why Packet Count Is Not Battery Consumption
 
-A simple calculation such as:
+A calculation such as:
 
 ```text
 4 packets / 180 s
@@ -805,230 +807,252 @@ cannot be converted directly into:
 mAh/day
 ```
 
-because the energy cost depends on factors including:
+without measuring or otherwise establishing the corresponding physical power states.
 
-- radio wake state
+The incremental energy depends on factors including:
+
+- whether the host was already awake
+- whether the WF200 was already active
 - TX duration
 - receive windows
-- CPU processing
-- packet retries
-- WLAN power state
-- interaction with existing awake periods
-- RF conditions
+- retransmissions
+- RSSI and RF conditions
+- WLAN power-save state
+- interaction with other scheduled activity
+- host sleep admission after the operation
 
-A packet emitted while the radio is already active may have a different
-incremental cost from a packet that causes an otherwise unnecessary wake
-sequence.
+A packet transmitted during an already active interval may cost substantially less incremental energy than a packet sequence that creates an otherwise unnecessary wake period.
 
-Therefore the runtime packet comparison is a workload measurement, not an
-electrical power measurement.
+The packet captures therefore measure recurring workload and network behavior, not electrical power.
 
 ---
 
-# 17. Relationship to Historical Battery Drain
+# 19. Battery Result of Patch B
 
-Historical observations indicate that battery drain existed on firmware 2.1.8
-as well as 2.2.4.
+The `.77` long-term result is useful because it rules out an overly simple battery hypothesis.
 
-This is compatible with the mDNS chronology because periodic connected mDNS
-behavior already existed before 2.2.4.
+Patch B removed the targeted periodic mDNS restart.
 
-However, this does not establish causality.
-
-The current historical model contains several potentially energy-relevant
-mechanisms:
+Nevertheless:
 
 ```text
-normal TRV workload
-        |
-        +-- normal WLAN power save
-        |
-        +-- valve motor
-        |
-        +-- RF conditions
-        |
-        +-- periodic mDNS
-        |
-        +-- Beacon Recovery in 2.2.4
-        |
-        +-- possible inherited WUP/EM2 behavior
+battery reached 0 %
+
+voltage reached 3.116 V
+
+Beacon Recovery remained ~58/hour
 ```
 
-Periodic mDNS remains one candidate contributor.
+over an uptime of approximately 9.23 days.
 
-It is not established as the complete explanation.
+The correct interpretation is:
 
----
+> Removing the periodic mDNS restart alone did not prevent poor battery endurance on the tested device.
 
-# 18. Runtime Comparison Summary
+It would be incorrect to conclude:
 
-| Configuration | Targeted periodic mDNS | Approximate behavior | Beacon Recovery |
-|---|---|---|---|
-| 2.1.0 stock | not observed in original window | no comparable burst in ~13 min | 2.2.4 mechanism absent |
-| 2.1.3 stock | observed | ~60 s | 2.2.4 mechanism absent |
-| 2.2.4 stock | observed | ~180 s | present under qualifying conditions |
-| 2.2.4 + Patch B | not observed in Patch-B capture | targeted cycle suppressed | remains stock |
+> Therefore mDNS consumes no relevant energy.
 
-This table describes the observed/tested configurations.
+The experiment did not contain a simultaneous otherwise-identical electrical A/B pair, and no current measurement was performed.
 
-It does not represent an electrical-energy ranking.
+Likewise, it would be incorrect to conclude:
 
----
+> The remaining Beacon Recovery events caused the entire discharge.
 
-# 19. Evidence Summary
-
-| Finding | Classification |
-|---|---|
-| No comparable periodic mDNS burst was observed from 2.1.0 during the ~13-minute capture | **PROVEN** |
-| 2.1.0 can never emit mDNS | **UNKNOWN** |
-| 2.1.3 produced periodic mDNS bursts | **PROVEN** |
-| 2.1.3 observed cadence was ~60 s | **PROVEN** |
-| Stock 2.2.4 produced periodic mDNS bursts | **PROVEN** |
-| Stock 2.2.4 observed cadence was ~180 s | **PROVEN** |
-| Periodic mDNS behavior predates 2.2.4 | **PROVEN** |
-| Patch B capture contained no targeted periodic mDNS traffic | **PROVEN** |
-| Patch B suppresses the targeted periodic restart under tested conditions | **STRONGLY SUPPORTED** |
-| Patch B disables every mDNS path | **UNKNOWN** |
-| Beacon Recovery continues with Patch B | **PROVEN** |
-| Periodic mDNS is required for recurring Beacon Recovery | **UNKNOWN; tested behavior demonstrates that it is unnecessary under the observed conditions** |
-| Periodic mDNS adds recurring network workload | **PROVEN** |
-| Periodic mDNS has non-zero energy cost | **STRONGLY SUPPORTED** |
-| Quantitative energy cost of periodic mDNS | **UNKNOWN** |
-| Periodic mDNS is a major historical battery-drain cause | **UNKNOWN** |
-| Patch B improves long-term battery endurance | **UNKNOWN** |
+That causal step has not been demonstrated.
 
 ---
 
-# 20. Remaining Questions
+# 20. Relationship to the General Battery-Drain Investigation
 
-The main unresolved questions are:
-
-1. What is the electrical energy cost of one periodic mDNS restart sequence?
-
-2. Does suppressing the periodic restart measurably improve long-term battery
-   endurance?
-
-3. Does the cost depend strongly on RSSI or retransmissions?
-
-4. Does the periodic restart coincide with other awake activity, reducing its
-   incremental energy cost?
-
-5. Are there long-term connectivity consequences from suppressing the periodic
-   restart?
-
-6. Under which events are the remaining non-periodic mDNS paths activated?
-
-7. Does firmware 2.1.8 produce the expected ~180-second runtime cadence in a
-   direct packet capture?
-
-8. Is the transition from ~60 seconds to ~180 seconds purely the result of the
-   identified connected-maintenance gating?
-
-9. How much of the historical 2.1.x battery behavior can be attributed to mDNS
-   versus other inherited power-management changes?
-
-These questions require either longer controlled observation or direct
-electrical measurement.
-
----
-
-# 21. Current Research Direction
-
-The original planned Patch-B experiment has been completed.
-
-The current research path is therefore:
+The current investigation contains several distinct mechanisms with possible energy relevance:
 
 ```text
-static mDNS analysis
-        |
-        v
-stock runtime validation
-        |
-        v
-Patch-B isolation
-        |
-        v
-runtime suppression confirmed in finite window
-        |
-        v
-long-term battery comparison
+TRV workload
+    |
+    +-- thermostat / valve operation
+    |
+    +-- WLAN traffic
+    |
+    +-- periodic mDNS
+    |
+    +-- Beacon Recovery
+    |
+    +-- host power-management ownership
+    |
+    +-- host sleep blockers
+    |
+    +-- WF200 power-save behavior
+    |
+    +-- RF / AP conditions
 ```
 
-In parallel:
+The periodic mDNS restart is now one of the better isolated variables.
+
+Its status is:
 
 ```text
-Beacon Recovery analysis
-        |
-        v
-C1a / C1b / C2
-        |
-        v
-Patch C-C
-        |
-        v
-static pre-build qualification passed
-        |
-        v
-experimental build
-        |
-        v
-hardware qualification
+real firmware behavior:
+    yes
+
+recurring network workload:
+    yes
+
+runtime cadence known:
+    yes
+
+can be selectively suppressed:
+    yes
+
+required for recurring Beacon Recovery:
+    no
+
+required for poor battery behavior:
+    no evidence
+
+quantitative energy cost:
+    not measured
+
+complete battery-drain root cause:
+    not established
 ```
 
-The two mechanisms should remain separate variables whenever practical.
+This is a more useful result than simply classifying mDNS as either "the bug" or "irrelevant".
 
 ---
 
-# 22. Current Conclusion
+# 21. Device-History Note
 
-Runtime packet capture confirms that recurring mDNS behavior changed across
-Shelly TRV Gen1 firmware generations.
+The `.77` identifier appears in two different parts of this document because the same physical device was reused.
 
-The observed chronology is:
+Original cross-version capture:
+
+```text
+.77
+firmware 2.1.3
+```
+
+Later Patch-B experiment:
+
+```text
+.77
+firmware 2.2.4 + Patch B
+```
+
+The earlier dataset establishes the approximately 60-second behavior of firmware 2.1.3.
+
+The later dataset establishes the effect of suppressing the periodic restart in firmware 2.2.4.
+
+The datasets must not be mixed.
+
+The same principle applies to other devices that were reflashed during the investigation.
+
+Firmware identity should always be associated with the date and experimental configuration rather than inferred from the device suffix alone.
+
+---
+
+# 22. Remaining Questions
+
+The basic runtime behavior of the periodic mDNS mechanism is now well characterized.
+
+The remaining useful questions are narrower:
+
+1. What is the electrical energy cost of one periodic restart sequence?
+
+2. How much additional host and WF200 awake time does one restart create?
+
+3. Does the energy cost vary substantially with RSSI, retransmissions or AP behavior?
+
+4. Does suppressing the periodic restart measurably improve battery endurance in a controlled otherwise-identical A/B experiment?
+
+5. How often are the retained event-driven mDNS restart paths exercised during normal long-term operation?
+
+6. Does suppressing the periodic restart have any long-term effect on mDNS discoverability after reconnects, AP restarts or network changes?
+
+7. Does firmware 2.1.8 produce the expected approximately 180-second cadence in a dedicated packet capture?
+
+8. Can periodic mDNS influence the probability of an **initial fresh** Beacon Recovery event even though it is clearly not required for the recurring Recovery behavior?
+
+The last question is substantially narrower than the original hypothesis.
+
+A positive answer would not change the Patch-B result that periodic mDNS is unnecessary for the persistent Recovery loop.
+
+---
+
+# 23. Current Conclusion
+
+Runtime packet capture confirms that periodic mDNS behavior changed across Shelly TRV Gen1 firmware generations.
+
+The observed comparison is:
 
 ```text
 2.1.0
-no comparable periodic burst observed during ~13 min
+    no comparable periodic burst observed
+    during ~13-minute capture
+
 
 2.1.3
-~60-second recurring mDNS burst
+    recurring mDNS burst
+    ~60 s
 
-2.2.4
-~180-second recurring mDNS burst
+
+2.2.4 stock
+    recurring mDNS burst
+    ~180 s
+
+
+2.2.4 + Patch B
+    targeted recurring burst absent
+    during monitored capture
 ```
 
-Static analysis further indicates that the later ~180-second behavior already
-exists in 2.1.8.
+The Patch-B experiment then continued as a long-term test.
 
-Patch B was subsequently tested on firmware 2.2.4.
-
-During the monitored Patch-B capture:
+At approximately 9.23 days uptime, the device had accumulated:
 
 ```text
-targeted periodic mDNS packets = 0
+12908 Beacon Recovery events
 ```
 
-while normal device operation remained available.
+corresponding to approximately:
 
-At the same time, stock Beacon Recovery continued on the Patch-B device.
+```text
+58.3 recoveries/hour
+```
 
-Therefore the current evidence supports two separate conclusions:
+while the targeted periodic mDNS restart remained suppressed by the firmware modification.
 
-> Patch B suppresses the targeted recurring mDNS restart under the tested
-> conditions.
+The device ultimately reported:
 
-and:
+```text
+0 %
+3.116 V
+```
 
-> The targeted periodic mDNS restart is not required for the observed recurring
-> Beacon Recovery behavior.
+This provides a strong runtime separation between the two mechanisms:
 
-The mDNS mechanism remains energy-relevant because it creates recurring network
-activity.
+```text
+periodic mDNS restart
+        |
+        v
+not required
 
-Its quantitative contribution to the Shelly TRV Gen1 battery-drain problem
-remains:
 
-**UNKNOWN**
+for
+
+
+recurring Beacon Recovery
+```
+
+and also shows that suppressing the periodic restart alone did not prevent poor battery endurance on this particular device.
+
+Later C-C hardware testing further separates the problem.
+
+Correcting the known stale/signed/invalid-window Recovery behavior removes the corresponding host-side defects, but fresh qualifying Recovery events remain observable.
+
+The current interpretation is therefore:
+
+> The periodic mDNS restart is a confirmed recurring network workload whose cadence changed from approximately 60 seconds in firmware 2.1.3 to approximately 180 seconds in firmware 2.2.4. Patch B successfully suppresses the targeted recurring sequence. Long-term testing shows that recurring Beacon Recovery continues without it, so periodic mDNS is not required for the Recovery loop. The periodic workload may still have an energy cost, but its quantitative contribution to Shelly TRV Gen1 battery drain has not been measured and it is not established as the root cause.
 
 ---
 
@@ -1042,13 +1066,21 @@ Firmware chronology:
 
 [`../reverse-engineering/firmware-comparison.md`](../reverse-engineering/firmware-comparison.md)
 
-Power management:
+Beacon-counter measurement model:
 
-[`../reverse-engineering/power-management-and-sleep.md`](../reverse-engineering/power-management-and-sleep.md)
+[`../reverse-engineering/beacon-rx-counter.md`](../reverse-engineering/beacon-rx-counter.md)
+
+`real_beacon_skip` calculation:
+
+[`../reverse-engineering/real-beacon-skip.md`](../reverse-engineering/real-beacon-skip.md)
 
 Beacon Recovery:
 
 [`../reverse-engineering/recovery-mechanism.md`](../reverse-engineering/recovery-mechanism.md)
+
+Power management and host sleep:
+
+[`../reverse-engineering/power-management-and-sleep.md`](../reverse-engineering/power-management-and-sleep.md)
 
 Battery testing:
 
@@ -1060,20 +1092,34 @@ Experimental patches:
 
 ---
 
-# Methodology Note
+# Methodology
 
-The runtime findings in this document are based on packet captures from
-personally owned Shelly TRV Gen1 devices.
+The runtime findings in this document come from personally owned Shelly TRV Gen1 devices operated on a local WLAN.
 
-The experiments observe network behavior.
+The mDNS comparison used passive packet capture to observe UDP port 5353 traffic without intentionally generating service-discovery requests during the primary observation windows.
 
-They do not constitute laboratory-grade electrical power measurements.
+The investigation combines:
 
-Finite observation windows are described explicitly and must not be
-generalized beyond what they demonstrate.
+- packet capture
+- firmware identity
+- runtime `/status` data
+- runtime `/stats` data where available
+- Beacon Recovery counters
+- long-term battery-voltage logging
+- static firmware analysis
+- targeted experimental firmware modifications
 
-Firmware identity is determined from the actual experimental state at the time
-of each capture rather than inferred permanently from a device IP address.
+Packet capture establishes network behavior.
+
+Firmware counters establish software behavior.
+
+Battery voltage provides a useful long-term device metric.
+
+None of these individually constitutes a direct electrical current measurement.
+
+Finite packet-capture windows are described explicitly and should not be generalized beyond what they demonstrate.
+
+Firmware identity is determined from the actual experimental configuration at the time of each observation rather than permanently inferred from a device IP address.
 
 ---
 
@@ -1081,10 +1127,11 @@ of each capture rather than inferred permanently from a device IP address.
 
 This is an independent research project.
 
-It is not affiliated with, endorsed by, or supported by Shelly Group or
-Silicon Labs.
+It is not affiliated with, endorsed by, or supported by Shelly Group or Silicon Labs.
 
 All product names and trademarks belong to their respective owners.
 
-The findings describe observed and reverse-engineered behavior of the examined
-firmware versions and experimental configurations.
+The findings describe observed and reverse-engineered behavior of the examined firmware versions and experimental configurations.
+
+Statements about battery-drain causality are intentionally limited to what the available static and runtime evidence supports.
+```

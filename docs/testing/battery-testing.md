@@ -1,717 +1,553 @@
 # Battery Testing
 
-## Scope
+## Overview
 
-This document tracks the long-term battery investigation for Shelly TRV Gen1
-devices across different firmware and experimental patch configurations.
+This document tracks the long-term battery investigation of the Shelly TRV Gen1 across stock firmware, experimental host patches and different WF200 firmware versions.
 
-The purpose is to determine whether measurable battery behavior correlates with:
+The goal is not to derive laboratory-grade power consumption from battery percentage.
 
-- firmware version
-- periodic mDNS activity
-- firmware 2.2.4 Beacon Recovery
-- experimental firmware modifications
-- WLAN conditions
-- valve/motor workload
-- battery condition
-- device-specific characteristics
-- other configuration-dependent factors
+The goal is to determine whether reproducible battery behavior changes when specific firmware defects or recurring workloads are corrected.
 
-The investigation combines:
+The current investigation combines:
 
 ```text
-battery percentage
-+
 battery voltage
++
+battery percentage
 +
 firmware identity
 +
-runtime diagnostics
+runtime
 +
-WLAN conditions
+Beacon Recovery activity
 +
-motor workload
+WLAN statistics
 +
-uptime
+valve workload
++
+reboot / reconnect behavior
++
+long-term observation
 ```
 
-The current work is primarily a long-term observational comparison.
+No direct current measurement is currently part of the dataset.
 
-It is **not** a laboratory-grade electrical power measurement.
-
-> Cross-device differences in battery percentage or battery voltage must not be
-> interpreted directly as firmware energy consumption.
-
----
-
-# 1. Evidence Classification
-
-This project uses four evidence levels.
-
-## PROVEN
-
-Directly established from native firmware instructions, deterministic binary
-comparison, validated control flow, documented interface semantics, or
-sufficiently direct runtime evidence.
-
-## STRONGLY SUPPORTED
-
-Multiple independent findings support the conclusion, but some runtime,
-implementation, or environmental detail remains unresolved.
-
-## INFERENCE
-
-A technically plausible interpretation consistent with available evidence, but
-not directly established.
-
-## UNKNOWN
-
-Available evidence is insufficient to determine the behavior, quantitative
-effect, or original developer intent.
-
-Battery trends are described separately from firmware-mechanism proof.
-
----
-
-# 2. Core Research Questions
-
-The battery investigation currently separates several questions.
-
-## 2.1 Does stock 2.2.4 repeatedly enter Beacon Recovery?
-
-Yes.
-
-Affected stock 2.2.4 operation has shown the characteristic sequence:
+For that reason, values such as:
 
 ```text
-Beacon skip error! Attempt recovery
+Recovery events/hour
+Recovery wall-clock time
+beacon receive rate
+sleep_ratio
+```
+
+are diagnostic measurements.
+
+They must not be converted directly into:
+
+```text
+mA
+mAh/day
+battery percentage
+```
+
+without an electrical measurement.
+
+---
+
+# Test Objective
+
+The main question is:
+
+> Does correcting the identified host-side firmware defects and using the newer
+> WF200 firmware produce a reproducible improvement in real-world battery
+> endurance?
+
+The current corrected experimental stack is:
+
+```text
+Shelly TRV 2.2.4
         |
         v
-power-save state 1
+A1 host PM / lifecycle corrections
         |
         v
-approximately 5 serviced seconds
+Patch C-C Beacon Recovery corrections
         |
         v
-normal power-save restoration
+Shelly FMAC 3.7.0
+        |
+        v
+WF200 3.18.0
 ```
 
-During persistent operation, approximately:
+The long-term battery test compares this corrected stack with stock and earlier
+experimental configurations.
 
-```text
-1 Recovery / minute
-```
+The battery test is also used as an integration test.
 
-has been observed.
+A firmware that reduces one visible workload but causes:
 
-This is real additional firmware activity.
+- reconnects
+- reboots
+- broken thermostat operation
+- incorrect valve behavior
+- failed WLAN association
+- PM deadlocks
 
-Its exact electrical cost is not known.
-
-### Classification
-
-Recurring stock 2.2.4 Recovery:
-
-**PROVEN**
-
-Quantitative battery cost per Recovery:
-
-**UNKNOWN**
+would not be considered a successful correction.
 
 ---
 
-## 2.2 Why can Beacon Recovery repeat?
+# Battery Drain Is Not Treated as a Single-Cause Problem
 
-The current reverse-engineering result is substantially stronger than during
-the original battery-test phase.
+Battery drain has been observed on firmware versions predating 2.2.4.
 
-Three separate problems have been identified.
+This is an important boundary condition.
 
-```text
-C1a
-signed control-value validity
+The 2.2.4 Beacon Recovery implementation can therefore be an additional drain
+mechanism or amplifier, but it cannot by itself explain the complete historical
+Shelly TRV Gen1 battery-drain problem.
 
-C1b
-measurement-window validity
-
-C2
-post-Recovery control-evidence freshness
-```
-
-C2 explains the persistent recurrence.
-
-After a qualifying Recovery:
+The current model is:
 
 ```text
-previous_received = 0
+normal TRV consumption
+        |
+        +-- host MCU activity
+        |
+        +-- WF200 WLAN activity
+        |
+        +-- cloud / controller traffic
+        |
+        +-- valve motor
+        |
+        +-- RF conditions / retransmissions
+        |
+        +-- periodic mDNS
+        |
+        +-- Beacon Recovery
+        |
+        +-- host PM / transport defects
+        |
+        +-- possible WF200 PM defects
+        |
+        +-- other unidentified behavior
+        |
+        v
+total battery consumption
 ```
 
-while the qualifying cached:
-
-```text
-real_beacon_skip
-```
-
-remains stored.
-
-The next successful baseline-only acquisition can then evaluate that historical
-value before a fresh ratio has been calculated.
-
-This can trigger another Recovery and clear the baseline again.
-
-The loop can therefore sustain itself without requiring a new qualifying RF
-anomaly on every cycle.
-
-### Classification
-
-C2 stale-state recurrence in identified stock control flow:
-
-**PROVEN**
-
-C1a interpretation as control-validity defect:
-
-**STRONGLY SUPPORTED**
-
-C1b interpretation as measurement-validity defect:
-
-**STRONGLY SUPPORTED**
-
-Exact cause of the first field trigger:
-
-**UNKNOWN**
+The purpose of the experimental firmware is to remove demonstrated defects
+without assuming in advance which one dominates the battery result.
 
 ---
 
-## 2.3 Does periodic mDNS create recurring additional activity?
+# Measurement Method
 
-Yes.
+The TRV itself is the primary telemetry source.
 
-Runtime packet capture established approximately:
-
-```text
-2.1.0
-no comparable periodic burst observed during ~13 min
-
-2.1.3
-~60-second recurring burst
-
-2.2.4 stock
-~180-second recurring burst
-```
-
-A normal observed sequence contains approximately:
+The main endpoints are:
 
 ```text
-3 probes
-+
-1 announcement
+/status
+/stats
+/debug/log
 ```
 
-This is real recurring network activity.
+Not every firmware version exposes every endpoint.
 
-Its electrical cost remains unquantified.
-
-### Classification
-
-Periodic mDNS workload:
-
-**PROVEN**
-
-Quantitative battery contribution:
-
-**UNKNOWN**
-
----
-
-## 2.4 Does Patch B suppress the targeted periodic mDNS restart?
-
-During the monitored Patch-B experiment, yes.
-
-Device `.77` runs:
-
-```text
-2.2.4
-Patch B active
-Beacon Recovery stock
-```
-
-A TShark capture filtered for UDP port 5353 from `.77` showed:
-
-```text
-0 packets
-```
-
-during a window long enough that multiple stock 2.2.4 periodic cycles would
-normally have been expected.
-
-This is strong finite-window evidence that the targeted recurring mDNS restart
-was suppressed.
-
-Patch B does not intentionally disable all possible mDNS behavior.
-
-### Classification
-
-No targeted periodic packets during monitored Patch-B window:
-
-**PROVEN**
-
-Patch B suppresses targeted recurring restart under tested conditions:
-
-**STRONGLY SUPPORTED**
-
-Patch B disables all mDNS behavior:
-
-**UNKNOWN**
-
----
-
-## 2.5 Does Patch B also suppress Beacon Recovery?
-
-No under the tested conditions.
-
-`.77` continued entering stock Beacon Recovery after the targeted periodic mDNS
-restart had been suppressed.
-
-The current `.77` runtime condition is approximately:
-
-```text
-RSSI
--75 ... -77 dBm
-
-desired_beacon_skip
-15
-```
-
-The earlier:
-
-```text
--58 ... -59 dBm
-desired_beacon_skip = 20
-```
-
-observation must not be assigned to the current `.77` Patch-B role.
-
-Good-RSSI Recovery observations exist separately in the stock dataset.
-
-The important mechanism result is:
-
-> The targeted periodic mDNS restart is not required for the observed recurring
-> Beacon Recovery under the tested conditions.
-
-### Classification
-
-Beacon Recovery remains with Patch B:
-
-**PROVEN**
-
-mDNS restart is required for persistent Recovery:
-
-**UNKNOWN as a hypothetical requirement; the observed Patch-B behavior
-demonstrates that it is unnecessary under the tested conditions**
-
----
-
-## 2.6 Did Patch A suppress Beacon Recovery?
-
-Yes under the tested conditions.
-
-Patch A bypasses the targeted Recovery action while leaving beacon statistics
-available.
-
-Patch-A devices showed:
-
-```text
-beacon statistics active
-real_beacon_skip active
-desired_beacon_skip active
-Recovery counter = 0
-```
-
-This made Patch A useful for mechanism isolation.
-
-However, Patch A also removes legitimate Recovery behavior.
-
-It therefore does not represent the preferred final correction.
-
-### Classification
-
-Patch A suppresses targeted Recovery under tested conditions:
-
-**PROVEN**
-
-Patch A correctly repairs C1a/C1b/C2 semantics:
-
-**UNKNOWN as a hypothetical property; Patch A bypasses the action rather than
-implementing those corrections**
-
-Patch A improves battery endurance:
-
-**UNKNOWN**
-
----
-
-# 3. Historical Combined A+B Experiment
-
-The combined A+B firmware was tested on `.226`.
-
-Its purpose was to determine whether both identified recurring mechanisms could
-be suppressed simultaneously.
-
-During monitored runtime:
-
-```text
-targeted periodic mDNS
-not observed
-
-recurring Beacon Recovery
-not observed
-
-Wi-Fi
-operational
-
-local HTTP
-operational
-
-cloud
-operational after startup
-
-TRV / thermostat
-operational
-```
-
-This experiment remains important.
-
-It establishes that the two mechanism-isolation modifications can coexist under
-the tested conditions.
-
-However:
-
-```text
-A+B
-```
-
-is no longer the preferred candidate for the final Beacon Recovery correction.
-
-Patch A removes Recovery rather than correcting its evidence semantics.
-
-The current preferred Beacon Recovery research path is Patch C-C.
-
----
-
-# 4. Patch C-C
-
-Patch C is the research family designed to correct Beacon Recovery validity
-while preserving legitimate Recovery behavior.
-
-The current preferred implementation candidate is:
-
-```text
-Patch C-C
-```
-
-Its behavior-level objectives are:
-
-```text
-C1a
-prevent signed narrowing from turning large positive values into qualifying
-negative control values
-
-C1b
-invalidate the received-beacon baseline across measurement epochs where the
-fixed 600-based calculation is no longer valid
-
-C2
-prevent a baseline-only sample from acting on historical Recovery evidence
-```
-
-while preserving:
-
-```text
-diagnostic real_beacon_skip
-fresh legitimate Recovery
-normal PM restoration
-```
-
-Patch C-C does not intentionally change:
-
-```text
-periodic mDNS
-AP selection
-prevent_roaming
-RSSI thresholds
-desired_beacon_skip
-normal thermostat behavior
-```
-
-Static pre-build qualification has passed.
-
-At the current project stage:
-
-```text
-firmware build
-hardware flashing
-runtime validation
-battery validation
-```
-
-have not yet established Patch C-C behavior on physical hardware.
-
-### Classification
-
-Patch C-C static pre-build qualification:
-
-**PROVEN as project qualification status**
-
-Patch C-C runtime correctness:
-
-**UNKNOWN; hardware qualification pending**
-
-Patch C-C improves battery life:
-
-**UNKNOWN**
-
----
-
-# 5. Experimental Patch Roles
-
-The current research distinguishes four patch roles.
-
-| Configuration | Purpose | Current role |
-|---|---|---|
-| Stock 2.2.4 | control | primary unmodified reference |
-| Patch A | bypass Beacon Recovery | historical mechanism-isolation patch |
-| Patch B | suppress targeted periodic mDNS restart | active mDNS-isolation patch |
-| Patch A+B | suppress both targeted workloads | historical combined isolation experiment |
-| Patch C-C | correct C1a/C1b/C2 while retaining legitimate Recovery | current Beacon-Recovery candidate |
-
-The distinction is important.
-
-Patch A and A+B remain scientifically useful.
-
-They should not be presented as the current preferred final fix.
-
----
-
-# 6. Measurement Sources
-
-The battery logger queries each TRV directly.
-
-Primary battery fields are:
+The most important battery values are:
 
 ```text
 bat.value
 bat.voltage
 ```
 
-Where available, additional `/stats` information is collected.
-
-Relevant values include:
-
-- `real_beacon_skip`
-- desired beacon skip
-- received-beacon statistics
-- missed-beacon statistics
-- Beacon Recovery/error counter
-- other firmware-specific diagnostics
-
-The logger also records:
-
-- firmware version
-- uptime
-- RSSI
-- device address
-- diagnostic availability
-
-Debug logs are retained separately where needed.
-
-These can provide:
-
-- Recovery events
-- PM state transitions
-- valve movement
-- requested motor steps
-- executed motor steps
-
----
-
-# 7. Authoritative Battery Source
-
-For this investigation, battery state reported directly by the TRV is treated
-as the primary source.
-
-Home Assistant is not treated as authoritative when its displayed value differs
-from current TRV status.
-
-For example:
+Additional useful runtime values include:
 
 ```text
-TRV
-100 %
+uptime
+reboot_counter
+reconnect_counter
 
-Home Assistant
-91 %
+RSSI
+
+thermostat position
+target temperature
+measured temperature
+
+steps_counter
+
+sleep_ratio
+
+desired_beacon_skip
+real_beacon_skip
+
+beacon_err_counter
+beacon_rx_count
+beacon_rx_missed_count
+beacon_tbtt_diff
 ```
 
-does not justify replacing the direct TRV measurement with the Home Assistant
-value.
-
-Home Assistant may contain a differently timed or stale representation.
-
----
-
-# 8. Battery Percentage
-
-Battery percentage is calculated by device firmware.
-
-It is not a direct coulomb-counting measurement of consumed energy.
-
-It may depend on:
-
-- firmware estimation logic
-- voltage curve
-- battery chemistry
-- load history
-- calibration
-- state of charge
-
-A freshly charged battery may remain at:
+Where available, debug logs are used to correlate these counters with actual
+runtime events such as:
 
 ```text
-100 %
+Beacon skip error! Attempt recovery
+Power save state 1
+Power save state 3
+valve movement
+calibration
+WLAN reconnect
 ```
-
-while its voltage already changes.
-
-Percentage therefore has limited short-term resolution.
 
 ---
 
-# 9. Battery Voltage
+# Sampling Frequency
 
-Voltage provides a higher-resolution observational signal but is also not a
-direct energy measurement.
+Frequent diagnostic polling can itself disturb a low-power device.
 
-It varies with:
+For long-term battery comparison, unnecessary polling should therefore be
+avoided.
+
+The preferred long-term schedule is approximately:
+
+```text
+one planned measurement per day
+```
+
+A normal sample should obtain:
+
+```text
+/status
+```
+
+followed, where available, by:
+
+```text
+/stats
+```
+
+`/stats` causes additional communication with the WF200 and should not be
+treated as a completely passive observation.
+
+The long-term test therefore favors fewer well-defined samples over continuous
+manual polling.
+
+The automated logger may be used where required, but the measurement frequency
+must always be considered when interpreting low-power behavior.
+
+---
+
+# Battery Voltage Is the Primary Trend Metric
+
+Battery percentage is calculated by the device firmware.
+
+It is not a coulomb counter and does not directly measure consumed energy.
+
+It can remain unchanged for long periods and then move in relatively large
+steps.
+
+For this reason, the primary battery trend is:
+
+```text
+voltage over time
+```
+
+with:
+
+```text
+battery percentage
+```
+
+used as secondary information.
+
+Useful long-term metrics include:
+
+```text
+mV/day
+```
+
+and:
+
+```text
+%/day
+```
+
+but percentage should not be treated as having the same precision as voltage.
+
+---
+
+# Voltage Is Still Not an Energy Measurement
+
+Battery voltage is more useful than percentage for observing gradual change,
+but it is not a direct measurement of remaining capacity.
+
+Voltage depends on:
 
 - state of charge
-- motor load
-- WLAN activity
-- temperature
-- battery internal resistance
-- recovery after load
+- current load
+- recent valve movement
+- recent WLAN activity
+- battery temperature
+- internal resistance
 - battery age
 - time since charging
+- relaxation after load
 
-Therefore:
+A short-term change such as:
 
 ```text
-voltage decline
+3.626 V -> 3.609 V
 ```
 
-cannot automatically be converted into:
+must therefore not be extrapolated linearly into:
 
 ```text
-energy consumed
+expected battery lifetime
 ```
 
-The preferred interpretation combines:
+without a longer observation period.
+
+---
+
+# API Voltage and External Voltage Must Not Be Mixed
+
+Voltage measurements from different methods must remain separate.
+
+For example, an external measurement immediately after charging and a later
+TRV API measurement are not equivalent samples.
+
+A known example is:
 
 ```text
-percentage
-+
+external post-charge measurement:
+4.020 V
+```
+
+versus a later pre-flash API value:
+
+```text
+/status:
+3.630 V
+```
+
+These values are useful individually.
+
+They must not be combined into one continuous API voltage curve.
+
+Long-term comparisons should therefore identify the measurement source:
+
+```text
+TRV API
+```
+
+or:
+
+```text
+external meter
+```
+
+and avoid calculating a trend across different measurement methods.
+
+---
+
+# Battery Percentage
+
+Battery percentage remains useful for identifying large state changes and the
+final discharge condition.
+
+However:
+
+```text
+100 %
+```
+
+does not mean that two physical batteries contain exactly the same usable
+energy.
+
+Likewise:
+
+```text
+50 %
+```
+
+on two different TRVs does not establish equal remaining capacity.
+
+Percentage should therefore always be interpreted together with:
+
+```text
 voltage
-+
+runtime
+battery history
+device history
 workload
-+
-runtime diagnostics
-+
-time
 ```
 
 ---
 
-# 10. Battery Condition
+# Battery Condition
 
-The physical batteries are not guaranteed to have identical:
+The physical batteries in the test devices are not guaranteed to have
+identical:
 
 - age
 - usable capacity
 - internal resistance
 - charge history
-- previous workload
-- starting state of charge
+- previous discharge depth
+- temperature history
 
-This is one of the largest limitations of cross-device comparison.
+This remains one of the largest limitations of cross-device comparison.
 
-For example:
+A result such as:
 
 ```text
-TRV A
-99 % -> 90 %
-
-TRV B
-99 % -> 95 %
+TRV A: -5 %
+TRV B: -10 %
 ```
 
-does not establish that firmware A consumes more energy than firmware B.
+does not establish:
 
-Battery condition remains an explicit confounding variable.
+```text
+Firmware B consumes twice as much energy.
+```
+
+Long-term repeated behavior is more useful than a simple ranking of individual
+devices.
 
 ---
 
-# 11. Valve Motor Workload
+# Charge and T0 Procedure
 
-Valve movement represents substantial real electrical work.
+Where practical, devices used for a new long-term comparison should be charged
+individually.
 
-Conceptually:
-
-```text
-total battery consumption
-        |
-        +-- baseline electronics
-        |
-        +-- WLAN activity
-        |
-        +-- MCU activity
-        |
-        +-- valve motor
-```
-
-A device performing significantly more valve movement cannot be compared
-directly with a mostly stationary device without accounting for that workload.
-
-Motor-step information should therefore be retained whenever technically
-reliable.
-
-Useful fields include:
+Each device receives its own test start point:
 
 ```text
-motor_steps_raw
-motor_steps_delta
-motor_steps_total_interval
-movement_count
+T0
 ```
 
-Before treating a firmware value as cumulative, its behavior across:
+The T0 record should include at least:
 
 ```text
-reboot
-reset
-counter rollover
+timestamp
+firmware configuration
+WF200 firmware
+battery percentage
+battery voltage
+uptime
+RSSI
+reboot counter
+reconnect counter
+valve position
+target temperature
+measured temperature
+Beacon Recovery counter
+desired_beacon_skip
+real_beacon_skip
 ```
 
-must be established.
+Devices do not need to start at exactly the same voltage to provide useful
+observational data.
 
-The goal is initially relative workload normalization, not exact conversion of
-steps into joules or mAh.
+The starting condition must simply be documented so the resulting trajectory
+can be interpreted correctly.
 
 ---
 
-# 12. WLAN Signal Strength
+# Firmware Identity
 
-RSSI is recorded because RF conditions can influence normal WLAN behavior.
+A physical TRV does not permanently represent one firmware configuration.
 
-The identified desired beacon-skip policy is:
+Several devices in this project have run multiple firmware variants.
+
+Therefore:
+
+> Firmware identity must be determined from the actual firmware state and test
+> interval, not from the device IP address alone.
+
+Any OTA update or firmware change creates a new experimental interval.
+
+Data before and after that transition must not be combined as if the same
+firmware had run continuously.
+
+---
+
+# Valve and Motor Workload
+
+The valve motor performs real mechanical work and can represent a substantial
+battery load.
+
+Battery comparison must therefore consider:
+
+```text
+valve movement
+calibration
+heating demand
+target-temperature changes
+```
+
+A device that performs calibration and multiple full valve movements cannot be
+compared directly over a short interval with a device whose valve remains
+stationary.
+
+Where available, useful values include:
+
+```text
+steps_counter
+steps/hour
+valve position
+movement count
+```
+
+The objective is workload context.
+
+Motor steps are not currently converted into joules or mAh.
+
+---
+
+# Short-Uptime `steps/hour` Values
+
+The firmware can expose a calculated:
+
+```text
+steps/hour
+```
+
+value.
+
+This value requires caution immediately after boot.
+
+For example, calibration or a large valve movement during the first minutes of
+runtime can produce an extremely high calculated `steps/hour`.
+
+That does not represent the steady-state motor workload of the device.
+
+For long-term comparison:
+
+```text
+steps_counter
+```
+
+and the actual observation interval are more useful.
+
+---
+
+# WLAN Signal Strength
+
+RSSI is recorded because WLAN conditions can affect:
+
+- beacon policy
+- retransmissions
+- receive activity
+- reconnect behavior
+- cloud traffic
+- PM behavior
+
+The observed desired beacon-skip policy includes approximately:
 
 | RSSI | Desired beacon skip |
 |---|---:|
@@ -719,1683 +555,1903 @@ The identified desired beacon-skip policy is:
 | -79 to -70 dBm | 15 |
 | < -79 dBm | 10 |
 
-Lower skip values create more nominal beacon-listening opportunities.
+A lower desired skip means more frequent nominal beacon-listening
+opportunities.
 
-This does not mean complete-device current scales proportionally with skip.
+It does not mean that complete-device current scales proportionally with the
+skip value.
 
-Relevant additional variables include:
+RSSI is also not the complete RF picture.
 
-- WF200 state
-- retransmissions
-- network traffic
-- host awake time
-- Recovery behavior
-- motor workload
+Two devices with similar RSSI can still differ in:
 
----
-
-# 13. RSSI Does Not Explain Persistent Recovery
-
-Weak RSSI is not required by the host-side C2 recurrence.
-
-Once the firmware reaches:
-
-```text
-previous_received = 0
-real_beacon_skip = qualifying historical value
-```
-
-the next baseline-only acquisition can retrigger Recovery without a fresh ratio.
-
-Therefore persistent Recovery does not require:
-
-```text
-new poor RSSI every minute
-```
-
-or:
-
-```text
-new AP problem every minute
-```
-
-Separate stock observations also demonstrate Recovery under usable/good WLAN
-conditions.
-
-The current Patch-B `.77` device itself should be described using its actual
-current condition:
-
-```text
-RSSI approximately -75 ... -77 dBm
-desired_beacon_skip = 15
-```
-
-not the older unrelated −58/−59 dBm observation.
-
----
-
-# 14. RSSI Is Not the Complete RF Picture
-
-Displayed RSSI does not establish the associated BSSID.
-
-Host connection establishment uses:
-
-```text
-BSSID = wildcard
-Channel = 0
-prevent_roaming = 1
-```
-
-Concrete AP selection occurs below the Shelly host application.
-
-After association, autonomous WLAN-firmware roaming is prevented.
-
-Two devices with similar RSSI can therefore still have different:
-
-- BSSID
+- associated AP
 - channel
-- RF history
-- retransmission behavior
+- interference
+- retransmissions
 - connection history
-
-Detailed analysis is documented in:
-
-[`../reverse-engineering/ap-selection-and-roaming.md`](../reverse-engineering/ap-selection-and-roaming.md)
+- beacon timing
 
 ---
 
-# 15. Static IP vs. DHCP
+# `real_beacon_skip` Is Not a Physical Sleep Measurement
 
-The current device group contains both static-IP and DHCP configurations.
-
-Examples include:
+The name:
 
 ```text
-Static
-.11
-.77
-.88
-
-DHCP
-.226
-.228
-.229
+real_beacon_skip
 ```
 
-No evidence currently establishes static IP or DHCP as the cause of the battery
-drain.
+can be misleading.
 
-The variable is retained because it can influence:
+It is not a direct WF200 readback of the configured listen interval.
 
-- DHCP traffic
-- reconnect behavior
-- initialization timing
-- post-association network activity
-
-### Classification
-
-Static IP/DHCP materially explains battery drain:
-
-**UNKNOWN**
-
----
-
-# 16. Device Identity Rule
-
-Device IP addresses describe physical test devices.
-
-They do not permanently identify one firmware configuration.
-
-Several devices have run different firmware during different phases.
+It is calculated by the Shelly host from received-beacon statistics.
 
 Therefore:
 
-> Firmware identity must be determined from the actual device status and
-> measurement timestamp, not inferred from the IP address alone.
+```text
+desired_beacon_skip = 20
+real_beacon_skip    = 1
+```
 
-Reports spanning a firmware transition must be split at the transition.
+does not prove:
+
+```text
+WF200 actually used listen interval 1
+```
+
+and it does not prove:
+
+```text
+WF200 remained physically awake
+```
+
+The value remains useful because it is the input to Shelly's Beacon Recovery
+decision.
+
+It should not be treated as direct radio sleep telemetry.
 
 ---
 
-# 17. Current Relevant Device Roles
+# Beacon Recovery as a Battery Variable
 
-The recent mechanism-isolation phase uses the following physical devices.
+Firmware 2.2.4 can repeatedly enter the sequence:
 
-| Device | Relevant recent configuration | Network | Role |
-|---|---|---|---|
-| `.11` | 2.1.0 stock | Static IP | older firmware reference |
-| `.77` | 2.2.4 + Patch B | Static IP | mDNS isolation |
-| `.88` | 2.2.4 + Patch A | Static IP | historical Recovery isolation |
-| `.226` | 2.2.4 + Patch A+B | DHCP | historical combined isolation |
-| `.228` | 2.2.4 + Patch A | DHCP | historical Recovery isolation |
-| `.229` | 2.2.4 stock | DHCP | stock control |
+```text
+Beacon skip error! Attempt recovery
+        |
+        v
+Power save state 1
+        |
+        v
+approximately 5 serviced seconds
+        |
+        v
+Power save state 3
+```
 
-These roles describe the recent experimental phase.
+During the Recovery interval:
 
-Future Patch C-C hardware testing will create a new experimental phase and must
-be documented separately.
+- a less power-saving WLAN state is requested
+- deeper host sleep is restricted
+- additional PM control work occurs
+
+This makes Recovery a plausible battery workload.
+
+Its exact electrical cost has not been measured.
 
 ---
 
-# 18. Device `.11`
+# Stock Recovery Occupancy
 
-## Role
+Several devices have shown approximately one Beacon Recovery per minute.
 
-Older firmware reference.
-
-## Relevant firmware
+At:
 
 ```text
-2.1.0
-20211223-144805/v2.1.0@d30148ec
+60 Recoveries/hour
 ```
 
-## Network
+and approximately:
 
 ```text
-Static IP
+5 seconds/Recovery
 ```
 
-Earlier runtime logging demonstrated long uptime without the repeating
-2.2.4-style Beacon Recovery sequence.
-
-One historical observation included approximately:
+the explicit Recovery interval is:
 
 ```text
-uptime
-355568 s
-
-battery
-100 %
-
-voltage
-3.886 V
+60 × 5 s
+= 300 s/hour
+= 5 min/hour
+≈ 8.33% of wall-clock time
 ```
 
-before an intentional reboot.
+This is a time measurement.
 
-RSSI has varied significantly between historical observations.
-
-Values around:
+It is not:
 
 ```text
--83 dBm
+8.33% battery consumption
 ```
 
-and later approximately:
-
-```text
--59 dBm
-```
-
-have both occurred.
-
-Therefore no single historical RSSI should be treated as the permanent RF
-condition of `.11`.
-
-Firmware 2.1.0 remains useful as an older reference.
-
-It is not a laboratory-proven low-power baseline.
+No such conversion is justified without current measurement.
 
 ---
 
-# 19. Device `.77`
+# Patch C-C Recovery Behavior
 
-## Historical role
+Patch C-C corrects the identified stale and invalid Recovery-evidence problems
+without completely disabling Recovery.
 
-`.77` previously ran firmware 2.1.3 and participated in the original mDNS
-runtime comparison.
-
-At that time, recurring mDNS activity was observed approximately every:
+After a Recovery:
 
 ```text
-60 seconds
+old measurement baseline invalidated
+        |
+        v
+next successful sample establishes new baseline
+        |
+        v
+no Recovery from historical real_beacon_skip
+        |
+        v
+later comparable sample produces fresh estimate
 ```
 
-## Current role
-
-Patch-B mDNS-isolation device.
-
-## Current relevant configuration
+With the currently observed measurement cadence, this naturally limits fresh
+Recovery to approximately:
 
 ```text
-2.2.4
-Patch B active
-Patch A inactive
+30 Recoveries/hour
 ```
 
-Beacon Recovery remains stock.
+if every newly calculated value continues to qualify.
 
-## Network
+At approximately five seconds each:
 
 ```text
-Static IP
+30 × 5 s
+= 150 s/hour
+= 2.5 min/hour
+≈ 4.17% wall-clock time
 ```
 
-## mDNS result
+This is a cadence-dependent consequence of the current implementation.
 
-During the monitored Patch-B capture:
+It is not considered an optimized Recovery frequency.
+
+No technically justified minimum Recovery frequency has yet been established.
+
+---
+
+# Recovery Frequency Is a Trade-Off
+
+Further Recovery rate limiting is under consideration.
+
+However, reducing Recovery frequency cannot yet be assumed to be universally
+beneficial.
+
+The known side is:
 
 ```text
-targeted periodic mDNS packets
-0
+fewer Recoveries
+        |
+        v
+less guaranteed explicit Recovery time
 ```
 
-This provides strong finite-window evidence that Patch B suppresses the targeted
-periodic restart.
-
-## Beacon Recovery
-
-Beacon Recovery continued despite Patch B.
-
-Current observations place `.77` around approximately:
+The unknown side is:
 
 ```text
-RSSI
--75 ... -77 dBm
-
-desired_beacon_skip
-15
+if a real WF200 condition exists
+that leaves the radio awake
+        |
+        v
+less frequent Recovery
+        |
+        v
+the condition may remain active longer
 ```
 
-The recurring stock Recovery behavior remains present.
+Assume purely as a working hypothesis that:
 
-## Interpretation
+1. an unknown WF200 condition can leave the radio in an undesired awake state,
+2. D3 does not report this condition,
+3. Shelly's host heuristic detects it,
+4. Beacon Recovery reliably clears it.
 
-`.77` provides the cleanest current isolation between:
+Under those assumptions:
+
+| Recovery rate | Interval | Explicit Recovery time/hour | Maximum hypothetical fault duration | Average hypothetical duration* |
+|---:|---:|---:|---:|---:|
+| 60/hour | 1 min | ~300 s | ~1 min | ~30 s |
+| 30/hour | 2 min | ~150 s | ~2 min | ~1 min |
+| 4/hour | 15 min | ~20 s | ~15 min | ~7.5 min |
+
+\*Assuming random occurrence between two effective detection opportunities.
+
+Only the Recovery-time column is based on observed Recovery duration.
+
+The fault-duration columns are hypothetical.
+
+The calculation explains why the current C-C implementation does not
+arbitrarily reduce Recovery to a very low frequency.
+
+The demonstrated stale loop is removed.
+
+Fresh Recovery is retained until the physical condition behind the heuristic
+is better understood.
+
+---
+
+# D3 Parallel Observation
+
+The WF200 provides a known direct PM error channel:
 
 ```text
-periodic mDNS
+D3 PS_MODE_ERROR
+```
+
+A dedicated observer build on device `.11` records this channel while leaving
+normal Shelly Beacon Recovery and PM behavior active.
+
+This allows both mechanisms to be observed in parallel:
+
+```text
+Shelly host heuristic
+        |
+        v
+Beacon Recovery
 ```
 
 and:
 
 ```text
-Beacon Recovery
+WF200
+        |
+        v
+D3 PS_MODE_ERROR
 ```
 
-under the tested conditions.
+At the latest observation:
+
+```text
+uptime                 230144 s
+                       63.93 h
+
+Beacon Recoveries      3835
+Recovery rate          ~59.99/hour
+
+desired_beacon_skip    20
+real_beacon_skip       1
+
+D3 PS_MODE_ERROR       0
+
+reboot_counter         1
+reconnect_counter      1
+```
+
+This is an important result.
+
+During approximately 63.9 hours, the normal Shelly Recovery mechanism executed
+3,835 times while the known WF200 D3 PM-error channel reported no error.
+
+No observed Recovery during this period can therefore be directly tied to a
+reported D3 `PS_MODE_ERROR`.
+
+Likewise, no Recovery can be shown to have cleared a D3 error, because none was
+reported.
+
+This does not prove that the WF200 had no other internal problem.
+
+D3 is not complete physical sleep telemetry.
 
 ---
 
-# 20. Device `.88`
+# Device `.11` — D3 Observer
 
-## Role
-
-Historical Patch-A Recovery-isolation device.
-
-## Relevant configuration
+Current relevant configuration:
 
 ```text
-2.2.4
-Patch A active
+Host:
+2.2.4_D3 observer
+
+Beacon Recovery:
+stock behavior
+
+WF200:
+3.16.1
 ```
 
-## Network
+Latest long-running sample:
 
 ```text
-Static IP
+uptime              230144 s
+                    63.93 h
+                    2.66 days
+
+battery             43 %
+voltage             3.481 V
+
+reboot_counter      1
+reconnect_counter   1
+
+sleep_ratio         0.016867
+
+desired skip        20
+real skip           1
+
+beacon_err          3835
+
+D3 PS_MODE_ERROR    0
 ```
 
-The device continued calculating beacon statistics and `real_beacon_skip`
-while the targeted Recovery counter remained:
+The approximately:
 
 ```text
-0
+3835 / 230144 × 3600
+≈ 59.99 Recoveries/hour
 ```
 
-under observed patched operation.
+rate is essentially one Recovery per minute.
 
-This validates Patch A as a mechanism-isolation tool.
+At approximately five seconds each, the device accumulated roughly:
 
-It does not establish battery improvement.
+```text
+19175 seconds
+319.6 minutes
+5.33 hours
+```
+
+of explicit Recovery intervals during the observation.
+
+Again, this is not an energy measurement.
 
 ---
 
-# 21. Device `.228`
+# Device `.77` — Patch-B Full-Discharge Endpoint
 
-## Role
+Device `.77` is particularly useful because it reached a complete observed
+discharge endpoint while the targeted periodic mDNS restart was suppressed and
+stock Beacon Recovery remained active.
 
-Second historical Patch-A Recovery-isolation device.
-
-## Relevant configuration
+Relevant configuration:
 
 ```text
+Host:
 2.2.4
-Patch A active
+
+Patch B:
+active
+
+targeted periodic mDNS:
+suppressed under tested conditions
+
+Beacon Recovery:
+stock behavior
 ```
 
-## Network
+The final snapshot immediately before the device became unavailable showed:
 
 ```text
+uptime              797437 s
+                    221.51 h
+                    9.23 days
+
+battery             0 %
+voltage             3.116 V
+
+reboot_counter      1
+reconnect_counter   30
+
+RSSI                -79 dBm
+
+thermostat position 0 %
+target temperature  18.0 °C
+measured temperature
+                    18.7 °C
+
+sleep_ratio         0.014383
+
+desired skip        15
+real skip           1
+
+beacon_err          12908
+beacon_rx            1986494
+beacon_rx_missed     19603
+beacon_tbtt_diff     232
+```
+
+The complete-runtime Recovery rate is:
+
+```text
+12908 / 797437 × 3600
+≈ 58.27 Recoveries/hour
+```
+
+This is again very close to one Recovery per minute.
+
+At approximately five seconds per event:
+
+```text
+12908 × 5 s
+= 64540 s
+= 17.93 h
+```
+
+of explicit Recovery time accumulated.
+
+Relative to the complete runtime:
+
+```text
+64540 / 797437
+≈ 8.09%
+```
+
+of wall-clock time was spent in the explicit Recovery interval.
+
+This closely matches the approximately 8.33% expected for an exact
+once-per-minute five-second Recovery pattern.
+
+It does not mean that Recovery consumed 8.09% of the battery.
+
+---
+
+# Interpretation of the `.77` Endpoint
+
+The `.77` result is important for two reasons.
+
+First, it demonstrates that suppressing the targeted periodic mDNS restart did
+not prevent a complete discharge during this test.
+
+Second, stock Beacon Recovery remained highly active throughout the observed
+runtime.
+
+The result therefore supports:
+
+```text
+targeted periodic mDNS suppressed
+        +
+persistent Beacon Recovery remains
+        +
+complete discharge still occurs
+```
+
+It does not establish:
+
+```text
+Beacon Recovery caused the complete discharge
+```
+
+and it does not establish:
+
+```text
+mDNS has zero battery cost
+```
+
+It does show that the targeted periodic mDNS cycle is not sufficient by itself
+to explain the observed drain on this device.
+
+A final `/debug/log` was not captured before `.77` became unavailable.
+
+The final `/status` and `/stats` snapshots still preserve the important
+cumulative endpoint values.
+
+---
+
+# Device `.88` — C-C Long-Term Reference
+
+Device `.88` provides a useful C-C reference using the older WF200 firmware.
+
+Relevant configuration:
+
+```text
+Host:
+2.2.4 + Patch C-C
+
+WF200:
+3.16.1
+```
+
+A long-running observation around 9.9 days showed approximately:
+
+```text
+battery             56 %
+voltage             3.570 V
+
+beacon_err          0
+
+desired skip        20
+real skip           6
+```
+
+The important mechanism result is:
+
+```text
+C-C active
++
+no fresh qualifying Recovery during this interval
+```
+
+This is useful for comparison with devices where fresh C-C Recovery continues.
+
+It is not by itself proof that C-C improves battery life.
+
+---
+
+# Device `.237` — C-C + WF200 3.18.0 Reference
+
+Device `.237` combines:
+
+```text
+Patch C-C
++
+WF200 3.18.0
+```
+
+without the complete A1 host integration.
+
+An observed interval of approximately:
+
+```text
+15.19 h
+```
+
+showed:
+
+```text
+battery             72 %
+voltage             3.669 V
+
+sleep_ratio         0.020343
+
+desired skip        20
+real skip           1
+
+beacon_err          362
+```
+
+This corresponds to approximately:
+
+```text
+29.96 Recoveries/hour
+```
+
+The pattern is consistent with fresh C-C Recovery rather than the old
+once-per-minute stale self-trigger loop.
+
+This result is important because similar fresh Recovery is also observed on the
+integrated A1 device.
+
+The behavior therefore should not automatically be attributed to A1.
+
+---
+
+# Device `.234` — A1 + C-C + WF200 3.18.0
+
+Device `.234` is the first controlled hardware test of the complete current
+integration:
+
+```text
+A1
++
+Patch C-C
++
+WF200 3.18.0
+```
+
+Before flashing, `.234` ran stock 2.2.4 host behavior with WF200 3.18.0.
+
+The final pre-flash API status included:
+
+```text
+battery             66 %
+voltage             3.630 V
+
+uptime              187489 s
+                    52.08 h
+
+valve position      100 %
+target temperature  26.0 °C
+
+beacon_err          3124
+
+desired skip        20
+real skip           1
+
+sleep_ratio         0.019924
+```
+
+The stock host still showed the approximately once-per-minute Recovery loop
+despite WF200 3.18.0.
+
+This confirms that the C2 stale-Recovery loop is a host-side problem and is not
+removed simply by updating the WF200 firmware.
+
+---
+
+# `.234` OTA and Functional Qualification
+
+The integrated firmware was flashed successfully.
+
+The device completed:
+
+```text
+OTA
+        |
+        v
+cold reboot
+        |
+        v
+FMAC 3.7.0 initialization
+        |
+        v
+WF200 3.18.0 initialization
+        |
+        v
+scan
+        |
+        v
+join
+        |
+        v
 DHCP
+        |
+        v
+cloud
+        |
+        v
+normal PM operation
 ```
 
-The device was tested in different physical positions, so RSSI changed over
-time.
+Manual calibration was also completed successfully.
 
-Historical examples include approximately:
+Thermostat and valve operation continued normally.
+
+This is important because the battery test should only begin after basic
+functional qualification has passed.
+
+---
+
+# `.234` Early Runtime
+
+An early sample at approximately:
 
 ```text
--57 ... -58 dBm
+1060 s
 ```
 
-before relocation and later roughly:
+showed:
 
 ```text
--62 ... -71 dBm
+reboot_counter      1
+reconnect_counter   1
+
+battery             ~65 %
+voltage             ~3.626 V
+
+sleep_ratio         0.019083
+
+desired skip        20
+real skip           1
+
+beacon_err          9
 ```
 
-depending on the observation interval.
+The short-runtime `steps/hour` value was dominated by calibration and valve
+movement and is not representative of steady-state operation.
 
-Despite targeted Recovery suppression, one approximately 24-hour observation
-showed roughly:
+---
+
+# `.234` Multi-Hour Runtime
+
+After approximately:
 
 ```text
-battery
-74 % -> 65 %
-
-voltage
-3.686 V -> 3.623 V
+28587 s
+= 7.94 h
 ```
 
-These values are strongly confounded by:
+the device showed:
 
-- battery condition
-- motor workload
-- physical device
-- RF conditions
-- starting state
+```text
+battery             62 %
+voltage             3.609 V
 
-They do not quantify Patch-A energy consumption.
+reboot_counter      1
+reconnect_counter   1
 
-They do establish an important caution:
+valve position      0 %
+
+target temperature  20.6 °C
+measured temperature
+                    ~20.7 °C
+
+sleep_ratio         0.02081
+
+desired skip        15
+real skip           13
+
+beacon_err          217
+```
+
+Between the early and later samples:
+
+```text
+beacon_err:
+9 -> 217
+```
+
+over:
+
+```text
+27527 s
+```
+
+which corresponds to approximately:
+
+```text
+27.2 Recoveries/hour
+```
+
+The pattern is consistent with fresh C-C Recovery rather than the stock stale
+once-per-minute loop.
+
+No additional reboot or reconnect occurred.
+
+---
+
+# `.234` Battery Interpretation
+
+The clean post-calibration voltage baseline was approximately:
+
+```text
+3.626 V
+```
+
+and the later value approximately:
+
+```text
+3.609 V
+```
+
+for a difference of:
+
+```text
+-17 mV
+```
+
+over roughly 7.5 hours.
+
+This interval is too short for a meaningful battery-life extrapolation.
+
+The device had also recently experienced:
+
+- OTA
+- reboot
+- calibration
+- substantial valve movement
+- target-temperature changes
+
+A later log sample around:
+
+```text
+3.599 V
+```
+
+followed by:
+
+```text
+3.609 V
+```
+
+also demonstrates short-term voltage rebound.
+
+The correct current conclusion is therefore:
+
+> The integrated firmware has passed the initial functional hardware test.
+> Its long-term battery effect is not yet established.
+
+---
+
+# WF200 3.18.0 as a Battery Variable
+
+Silicon Labs WF200 firmware 3.18.0 contains the following relevant fix:
+
+```text
+[LMAC] Fixed an error that was preventing the device from sleeping
+after a power-save mode change
+```
+
+This is directly relevant to a battery-powered device that repeatedly changes
+power-save mode.
+
+It is not proof that this Silicon Labs defect caused the historical Shelly TRV
+battery drain.
+
+The project therefore treats WF200 3.18.0 as an important experimental
+variable rather than a proven root-cause fix.
+
+Physical testing has established that Shelly FMAC 3.7.0 can initialize and
+operate the tested WF200 3.18.0 integration on the TRV Gen1.
+
+---
+
+# Historical Patch A
+
+Patch A bypassed the targeted Beacon Recovery action.
+
+It was useful for determining whether the device could continue operating
+without the repeated Recovery path.
+
+Patch-A devices retained beacon statistics while the targeted Recovery counter
+remained suppressed.
+
+This made Patch A useful as a mechanism-isolation tool.
+
+It is not the preferred correction because it removes legitimate Recovery
+rather than correcting the evidence used to trigger it.
+
+Historical Patch-A battery behavior also showed that:
 
 ```text
 Recovery suppressed
 ```
 
-does not automatically imply:
+does not automatically mean:
 
 ```text
-no observed battery decline
+no battery decline
 ```
 
-This is one reason Beacon Recovery must not be treated as the sole historical
-battery-drain explanation.
+This is another reason the historical battery problem is not treated as a
+single-cause issue.
 
 ---
 
-# 22. Device `.226`
+# Historical Patch B
 
-## Historical role
+Patch B suppresses the targeted periodic mDNS restart while leaving Beacon
+Recovery active.
 
-`.226` previously ran other firmware configurations, including 2.1.3.
+Device `.77` became the most useful Patch-B long-term example.
 
-Those older intervals must not be mixed with its later A+B data.
-
-## Combined-isolation role
-
-Relevant later configuration:
+Its complete discharge endpoint now shows:
 
 ```text
-2.2.4
-Patch A active
-Patch B active
+targeted periodic mDNS suppressed
+Beacon Recovery ~58.27/hour
+runtime ~9.23 days
+final battery 0 %
+final voltage 3.116 V
 ```
 
-## Network
+This strengthens the separation between the periodic mDNS workload and the
+Beacon Recovery mechanism.
+
+It does not quantify the energy cost of either one.
+
+---
+
+# Historical Patch A+B
+
+Patch A+B was used as a mechanism-isolation experiment.
+
+During monitored operation:
 
 ```text
-DHCP
-```
-
-During monitored runtime:
-
-```text
-boot
-successful
-
-Wi-Fi
-operational
-
-HTTP
-operational
-
-cloud
-operational after startup
-
-thermostat
-operational
-
 targeted periodic mDNS
 not observed
 
 recurring Beacon Recovery
 not observed
+
+Wi-Fi
+operational
+
+cloud
+operational
+
+thermostat
+operational
 ```
 
-An early post-installation overnight period showed comparatively stable voltage
-around:
+This demonstrated that both targeted recurring workloads could be suppressed
+simultaneously without immediately breaking normal operation.
 
-```text
-3.65 V
-```
+A+B is no longer the preferred final architecture.
 
-with percentage around:
-
-```text
-69 ... 70 %
-```
-
-This was encouraging but insufficient for a battery-life conclusion.
-
-The A+B experiment should now be treated primarily as a successful historical
-mechanism-isolation experiment.
+The current research uses C-C instead of simply bypassing Recovery and A1 for
+the identified host PM/lifecycle defects.
 
 ---
 
-# 23. Device `.229`
+# Current Device Matrix
 
-## Role
+The device roles have changed during the project.
 
-Unmodified stock 2.2.4 control.
+The current relevant roles are approximately:
 
-## Firmware
-
-```text
-2.2.4
-20240619-130912/v2.2.4@ee290818
-```
-
-## Network
-
-```text
-DHCP
-```
-
-`.229` previously ran 2.1.8.
-
-Reports crossing that transition must therefore be split.
-
-Under stock 2.2.4, `.229` has repeatedly produced the characteristic Recovery
-cycle.
-
-Observed counter behavior has included approximately:
-
-```text
-+30 events / 30 minutes
-```
-
-corresponding to approximately:
-
-```text
-1 Recovery / minute
-```
-
-If uninterrupted, that event rate would correspond numerically to:
-
-```text
-~60 / hour
-~1440 / day
-```
-
-This is an event-frequency extrapolation only.
-
-It is not an energy measurement.
-
-Stock `.229` debug observations have also shown Recovery under good/usable RSSI
-conditions, including observations around approximately:
-
-```text
--59 dBm
-```
-
-This supports the conclusion that obviously weak RSSI is not required for
-Recovery.
-
----
-
-# 24. Initial Battery Snapshot
-
-Historical short-term observations remain useful as descriptive data.
-
-They are not a controlled firmware-efficiency benchmark.
-
-Representative earlier observations included:
-
-| Device | Configuration | Representative interval | Battery | Voltage | Recovery |
-|---|---|---|---|---|---|
-| `.229` | stock 2.2.4 | ~24 h, freshly charged region | ~100 % | ~4.133 -> 4.111 V | ~1/min |
-| `.77` | Patch B | ~24 h historical snapshot | ~99 % | ~3.897 -> 3.872 V | present |
-| `.88` | Patch A | ~23.5 h | ~86 -> 83 % | ~3.764 -> 3.743 V | suppressed |
-| `.228` | Patch A | ~24 h | ~74 -> 65 % | ~3.686 -> 3.623 V | suppressed |
-| `.226` | A+B early post-install | ~12 h | ~69-70 % | roughly stable near 3.65 V | not observed |
-
-These values must not be used to calculate:
-
-```text
-Patch X saves Y %
-```
-
-or:
-
-```text
-Firmware A consumes Z times more energy
-```
-
-because the devices and batteries are not equivalent.
-
----
-
-# 25. What the Historical Snapshot Establishes
-
-Several useful conclusions can still be drawn.
-
-## Finding 1
-
-Stock 2.2.4 can produce persistent additional Beacon Recovery activity.
-
-**PROVEN**
-
-## Finding 2
-
-Patch B suppresses targeted periodic mDNS while Beacon Recovery remains.
-
-**PROVEN for the observed runtime behaviors**
-
-## Finding 3
-
-Patch A suppresses targeted Recovery while beacon statistics remain available.
-
-**PROVEN under tested conditions**
-
-## Finding 4
-
-Recovery suppression alone did not eliminate all observed battery decline on
-every Patch-A device.
-
-**PROVEN as an observation**
-
-Its causal explanation remains:
-
-**UNKNOWN**
-
-## Finding 5
-
-The early A+B voltage behavior was encouraging but insufficient to establish
-improved endurance.
-
-Battery improvement remains:
-
-**UNKNOWN**
-
----
-
-# 26. Historical Drain Predates 2.2.4
-
-Historical observation indicates that firmware 2.1.8 also exhibited relatively
-rapid battery decline.
-
-Therefore:
-
-```text
-2.2.4 Beacon Recovery
-```
-
-cannot explain the complete historical Shelly TRV Gen1 battery-drain problem.
-
-This is an important boundary condition.
-
-The older drain may involve:
-
-- periodic mDNS
-- WLAN-stack changes
-- RF behavior
-- PM behavior
-- WUP/EM2-related behavior
-- other unidentified mechanisms
-
-The responsible mechanism or combination remains unresolved.
-
-### Classification
-
-Historical drain was observed before 2.2.4:
-
-**STRONGLY SUPPORTED**
-
-Beacon Recovery explains all historical drain:
-
-**UNKNOWN as a hypothetical explanation; chronology demonstrates that it cannot
-be sufficient by itself**
-
----
-
-# 27. WUP / EM2 Candidate
-
-Separate reverse engineering identified a conditional host-side path where
-sleep-resource release may not complete under some conditions.
-
-This behavior predates 2.2.4.
-
-Its static existence is relevant because it could potentially affect deep-sleep
-eligibility.
-
-However, current evidence does not establish:
-
-- how often it occurs on physical devices
-- how long the condition persists
-- whether it materially affects average current
-- whether it explains historical battery drain
-
-Blindly forcing resource release would be unsafe because the retained resource
-may be required for valid WLAN or interrupt state.
-
-Therefore no WUP/EM2 patch is currently justified solely from the battery data.
-
-### Classification
-
-Identified conditional path:
-
-**PROVEN**
-
-Frequent physical occurrence:
-
-**UNKNOWN**
-
-Quantitative battery contribution:
-
-**UNKNOWN**
-
----
-
-# 28. Major Confounding Variables
-
-The current battery comparison contains substantial confounding variables.
-
-| Variable | Controlled? | Relevance |
+| Device | Current / relevant configuration | Main role |
 |---|---|---|
-| Firmware | partially | primary research variable |
-| Physical TRV | no | hardware variation |
-| Battery age | no | potentially large |
-| Battery capacity | no | potentially large |
-| Internal resistance | no | affects voltage under load |
-| Starting state of charge | no | affects comparison |
-| Valve workload | no | significant electrical load |
-| Motor steps | partially available | important normalization variable |
-| RSSI | recorded | affects WLAN policy |
-| Actual BSSID | not continuously recorded | RF uncertainty |
-| Device location | not identical | RF/temperature difference |
-| Static IP/DHCP | mixed | possible network difference |
-| Temperature | not fully controlled | battery/heating influence |
-| Heating demand | not identical | changes motor work |
-| Uptime | recorded | detects resets |
-| Firmware transitions | present historically | requires interval splitting |
+| `.11` | 2.2.4_D3, stock Recovery, WF200 3.16.1 | D3 / stock-Recovery reference |
+| `.77` | 2.2.4 + Patch B, stock Recovery | completed mDNS-isolation discharge |
+| `.88` | 2.2.4 + C-C, WF200 3.16.1 | C-C long-term reference |
+| `.229` | stock 2.2.4 | stock control |
+| `.234` | A1 + C-C + WF200 3.18.0 | integrated canary |
+| `.237` | C-C + WF200 3.18.0 | C-C / WF200 3.18 comparison |
+| `.226` | historical combined isolation configuration | secondary historical reference |
 
-These limitations must remain visible in every battery conclusion.
+This table describes experimental roles, not permanent device identities.
+
+Firmware must still be checked from the actual test interval.
 
 ---
 
-# 29. Why Cross-Device Ranking Is Weak
+# Stock Control
 
-A result such as:
+At least one stock 2.2.4 device should remain unmodified during the main
+long-term corrected-firmware comparison.
+
+The stock device provides a contemporaneous reference for:
 
 ```text
-Device A
--3 %
-
-Device B
--9 %
+battery voltage
+battery percentage
+Recovery frequency
+WLAN behavior
+valve workload
+reboots
+reconnects
 ```
 
-does not establish a firmware efficiency ratio.
+A stock control does not eliminate environmental differences between physical
+TRVs.
 
-A more defensible interpretation is:
+It is still substantially more useful than comparing the corrected firmware
+only with old historical data.
+
+---
+
+# Normal Heating Operation
+
+The long-term field test is intended to use the TRVs in normal heating
+operation.
+
+This means that:
 
 ```text
-battery trend
-+
-voltage trend
-+
-motor workload
-+
+valve activity
+heating demand
+room temperature
+```
+
+will not be perfectly controlled.
+
+That is intentional.
+
+The final question is not only whether the firmware behaves well on a bench.
+
+It is whether the corrected firmware remains stable and shows improved battery
+behavior during realistic TRV operation.
+
+The resulting data remain observational rather than laboratory-controlled.
+
+---
+
+# Main Long-Term Metrics
+
+The primary long-term battery metric is:
+
+```text
+mV/day
+```
+
+Secondary battery information includes:
+
+```text
+%/day
+```
+
+Important mechanism metrics include:
+
+```text
+Recovery events/hour
+
+beacon_rx/second
+
+beacon missed rate
+
+desired_beacon_skip
+
+real_beacon_skip
+
+sleep_ratio
+
+reboot count
+
+reconnect count
+```
+
+Workload context includes:
+
+```text
+motor steps
+valve position
+target temperature
+measured temperature
 RSSI
-+
-Recovery activity
-+
-mDNS configuration
-+
-uptime
-+
-battery history
-+
-device history
-=
-observational evidence
 ```
 
-Longer observation and repeated patterns increase confidence.
-
-They do not eliminate uncontrolled variables automatically.
+No single metric is expected to explain the complete result.
 
 ---
 
-# 30. Firmware Transitions
+# Recovery Rate Calculation
 
-Uptime and firmware identity must be used to detect experimental boundaries.
+Recovery rate can be calculated from cumulative counter differences.
 
 For example:
 
 ```text
-firmware A
-high uptime
-        |
-        v
-OTA / reboot
-        |
-        v
-firmware B
-low uptime
+delta_recovery = recovery_2 - recovery_1
+
+delta_time = uptime_2 - uptime_1
 ```
 
-A report containing:
+then:
 
 ```text
-12 h firmware A
-+
-12 h firmware B
+Recovery/hour
+=
+delta_recovery / delta_time × 3600
 ```
 
-must not be treated as:
+For a complete uninterrupted runtime from boot:
 
 ```text
-24 h firmware A
+Recovery/hour
+=
+beacon_err_counter / uptime × 3600
+```
+
+This is appropriate only when the counter semantics and firmware interval are
+known.
+
+A firmware transition or counter reset requires a new interval.
+
+---
+
+# Recovery Wall-Clock Calculation
+
+For the observed approximately five-second Recovery interval:
+
+```text
+Recovery wall-clock/hour
+≈
+Recovery/hour × 5 s
+```
+
+For example:
+
+```text
+60/hour
+≈ 300 s/hour
+≈ 5 min/hour
+≈ 8.33%
 ```
 
 or:
 
 ```text
-24 h firmware B
+30/hour
+≈ 150 s/hour
+≈ 2.5 min/hour
+≈ 4.17%
 ```
 
-All trend calculations must be segmented at firmware transitions.
+This value describes explicit Recovery occupancy.
+
+It must not be reported as an equivalent battery percentage.
 
 ---
 
-# 31. Current Battery-Drain Model
+# Beacon Receive Rate
 
-The current evidence supports a multi-mechanism model.
+Where useful:
 
 ```text
-normal TRV workload
-        |
-        +-- baseline electronics
-        |
-        +-- normal WLAN power save
-        |
-        +-- cloud/controller traffic
-        |
-        +-- valve motor workload
-        |
-        +-- RF conditions / retransmissions
-        |
-        +-- periodic mDNS restart
-        |
-        +-- 2.2.4 Beacon Recovery
-        |
-        +-- possible inherited WUP/EM2 behavior
-        |
-        +-- other unidentified effects
-        |
-        v
-total battery consumption
+beacon_rx/second
 ```
 
-Patch B isolates one recurring network workload.
+can be calculated from counter differences:
 
-Patch A historically isolated Recovery by bypassing it.
+```text
+delta_beacon_rx / delta_time
+```
 
-Patch C-C is designed to correct the known Recovery validity problems without
-removing legitimate Recovery.
+This provides a more useful comparison than absolute cumulative counts between
+devices with different uptimes.
 
-None of these facts establishes that one mechanism explains all battery drain.
+It still does not directly measure radio power consumption.
 
 ---
 
-# 32. C1a and Battery Relevance
+# Reboots and Reconnects
 
-C1a allows certain positive calculated values to qualify because the stored byte
-is interpreted as signed by the Recovery predicate.
+Battery trends are difficult to interpret if a device repeatedly reboots or
+reconnects.
+
+The following should therefore always be retained:
+
+```text
+reboot_counter
+reconnect_counter
+uptime
+```
+
+A battery improvement accompanied by frequent reconnects would not represent a
+successful production correction.
+
+The initial `.234` integrated test is encouraging in this respect because:
+
+```text
+reboot_counter    = 1
+reconnect_counter = 1
+```
+
+remained unchanged during the initial multi-hour qualification.
+
+---
+
+# `sleep_ratio`
+
+The firmware exposes a:
+
+```text
+sleep_ratio
+```
+
+value.
+
+This is useful as a comparative diagnostic.
+
+It should not be interpreted as a direct electrical duty-cycle measurement
+without establishing its exact implementation and relationship to physical
+host/radio sleep.
+
+In particular:
+
+```text
+sleep_ratio
+```
+
+should not be converted directly into expected battery life.
+
+---
+
+# Major Confounding Variables
+
+The current long-term experiment contains unavoidable confounders.
+
+| Variable | Status | Relevance |
+|---|---|---|
+| Firmware | controlled per interval | primary variable |
+| WF200 firmware | controlled per interval | primary variable |
+| Physical TRV | differs | hardware variation |
+| Battery age | differs | capacity / resistance |
+| Battery history | differs | starting condition |
+| Valve workload | recorded where possible | significant load |
+| Calibration | documented | significant short-term load |
+| RSSI | recorded | WLAN policy / RF |
+| Associated AP | not always continuously recorded | RF uncertainty |
+| Device location | differs | RF / temperature |
+| Heating demand | differs | motor workload |
+| Temperature | differs | battery / heating |
+| Network traffic | not identical | WLAN activity |
+| Reboots | recorded | experimental boundary |
+| Reconnects | recorded | WLAN workload |
+| Diagnostic polling | minimized | measurement perturbation |
+
+These variables should remain visible when interpreting any battery ranking.
+
+---
+
+# Same-Device Testing
+
+Where practical, same-device A/B testing remains useful.
 
 For example:
 
 ```text
-delta = 3
-600 / 3 = 200
-0xC8 interpreted signed = -56
-
-delta = 4
-600 / 4 = 150
-0x96 interpreted signed = -106
-```
-
-The stock fresh-trigger domain therefore includes:
-
-```text
-3
-4
-201 ... 600
-```
-
-rather than only the ordinary positive quotient domain expected from an
-unsigned interpretation.
-
-C1a can create an invalid Recovery trigger.
-
-The battery relevance is indirect:
-
-```text
-invalid trigger
+same TRV
         |
-        v
-Recovery workload
+        +-- stock firmware interval
         |
-        ?
-        v
-additional energy
+        +-- corrected firmware interval
 ```
 
-The electrical magnitude remains unknown.
+This removes some hardware variation.
+
+It does not remove:
+
+- battery aging
+- different starting state of charge
+- seasonal heating demand
+- room temperature changes
+- RF changes
+- different motor workload
+
+Same-device testing is therefore stronger than simple cross-device ranking but
+still not equivalent to direct electrical measurement.
 
 ---
 
-# 33. C1b and Battery Relevance
+# Why Short 24-Hour Rankings Are Weak
 
-The stock calculation uses:
+A one-day result can be dominated by:
 
-```text
-600 / delta_received
-```
+- post-charge relaxation
+- calibration
+- valve movement
+- room-temperature changes
+- temporary WLAN behavior
+- battery percentage quantization
 
-without storing elapsed time with the previous counter baseline.
-
-Skipped measurement opportunities can preserve the old baseline.
-
-The next successful measurement can therefore span a longer interval while
-still using:
+For this reason:
 
 ```text
-600
+24 hours
 ```
 
-as though the interval were nominal.
+is useful for detecting gross problems but weak for battery-life conclusions.
 
-This can produce a qualifying value even when the underlying radio behavior is
-not equivalent to the assumed measurement window.
-
-A reachable model exists in which a multi-minute baseline produces a qualifying
-result without requiring a persistent radio failure.
-
-The model demonstrates reachability.
-
-It does not prove that this was the actual first-trigger cause on a particular
-physical device.
-
----
-
-# 34. C2 and Battery Relevance
-
-C2 explains why one qualifying event can become a persistent recurring workload.
-
-Conceptually:
-
-```text
-qualifying R
-        |
-        v
-Recovery
-        |
-        v
-P cleared
-R retained
-        |
-        v
-next successful baseline acquisition
-        |
-        v
-historical R evaluated
-        |
-        v
-Recovery again
-```
-
-Once established, this can produce approximately minute-scale repeated Recovery
-without a fresh qualifying anomaly each time.
-
-This makes C2 especially important for battery research because it converts:
-
-```text
-one qualifying event
-```
-
-into:
-
-```text
-potentially long-lived recurring activity
-```
-
-The electrical cost of that recurring activity still requires measurement.
-
----
-
-# 35. Patch C-C Hardware Test Objectives
-
-Once a growth-aware Patch C-C build has been independently verified, hardware
-qualification should precede battery conclusions.
-
-The first hardware tests should establish:
-
-1. firmware boots normally
-2. WLAN association remains reliable
-3. cloud/local connectivity remains available
-4. thermostat and valve operation remain normal
-5. `/stats` remains coherent
-6. diagnostic `real_beacon_skip` remains available
-7. C1a invalid signed cases no longer trigger Recovery
-8. first post-Recovery baseline-only acquisition does not retrigger from
-   historical R
-9. a later fresh legitimate qualifying measurement can still trigger Recovery
-10. PM restoration remains functional
-11. no unexpected reboot or watchdog behavior appears
-12. network availability remains acceptable
-
-Battery endurance is a later qualification layer.
-
-A patch that reduces battery drain but damages WLAN reliability would not be an
-acceptable correction.
-
----
-
-# 36. Preferred Future Experimental Matrix
-
-The earlier A+B standardization plan is superseded by the current
-mechanism-level understanding.
-
-A cleaner future matrix is:
-
-```text
-Stock 2.2.4
-        |
-        +-- mDNS stock
-        +-- Beacon Recovery stock
-
-
-Patch B
-        |
-        +-- targeted mDNS suppressed
-        +-- Beacon Recovery stock
-
-
-Patch C-C
-        |
-        +-- mDNS stock
-        +-- Beacon Recovery validity corrected
-
-
-Patch B + qualified Patch C-C
-        |
-        +-- targeted mDNS suppressed
-        +-- corrected Beacon Recovery semantics
-```
-
-The final combined configuration should only be considered after Patch C-C has
-passed independent hardware qualification.
-
-Patch A+B remains a historical isolation reference.
-
----
-
-# 37. Why Patch C-C Should Be Tested Separately First
-
-Combining Patch B and Patch C-C immediately would make causal interpretation
-weaker.
-
-If battery behavior improved, it would be difficult to determine how much came
-from:
-
-```text
-mDNS suppression
-```
-
-versus:
-
-```text
-Beacon Recovery correction
-```
-
-Therefore the preferred order is:
-
-```text
-C-C alone
-        |
-        v
-functional qualification
-        |
-        v
-battery observation
-
-Patch B alone
-        |
-        v
-existing mDNS-isolation observation
-
-then, if justified:
-
-Patch B + C-C
-```
-
-This preserves experimental interpretability.
-
----
-
-# 38. Preferred Long-Term Battery Test
-
-After Patch C-C passes functional hardware qualification, a useful long-term
-comparison would include at least:
-
-```text
-Stock 2.2.4
-Patch B
-Patch C-C
-```
-
-and later, if justified:
-
-```text
-Patch B + Patch C-C
-```
-
-Where practical:
-
-- batteries should be charged consistently
-- firmware should remain unchanged during the test
-- devices should remain in stable installation positions
-- battery percentage and voltage should be logged
-- RSSI should be logged
-- Recovery statistics should be retained
-- uptime should be retained
-- motor workload should be retained
-- reboots should be documented
-- exceptional network events should be documented
-
-A useful observation period is at least several days.
-
-Approximately:
+A more useful field interval is:
 
 ```text
 7 days
 ```
 
-is substantially more informative than isolated 24-hour snapshots.
+and:
+
+```text
+14 days or longer
+```
+
+is preferable where practical.
+
+A complete discharge endpoint such as `.77` is especially useful because it
+captures the entire operational trajectory of that particular device and
+configuration.
+
+It still remains a single physical-device result.
+
+---
+
+# What `.77` Adds to the Dataset
+
+The `.77` endpoint provides something the earlier short snapshots did not:
+
+```text
+documented firmware role
++
+documented mDNS isolation
++
+cumulative Recovery count
++
+full uptime
++
+final battery percentage
++
+final battery voltage
++
+actual device shutdown shortly afterward
+```
+
+The final result is:
+
+```text
+~9.23 days
+12908 Recoveries
+~58.27 Recoveries/hour
+0 %
+3.116 V
+```
+
+This is stronger than extrapolating from an early voltage slope.
+
+It still cannot determine the individual energy cost of:
+
+```text
+Beacon Recovery
+mDNS
+WLAN conditions
+motor workload
+```
+
+without further controls.
+
+---
+
+# What `.11` Adds to the Dataset
+
+The `.11` D3 observer provides a different type of evidence.
+
+It shows that:
+
+```text
+~63.93 h
+3835 Beacon Recoveries
+0 D3 PS_MODE_ERROR
+```
+
+can coexist.
+
+This matters for battery interpretation because the approximately once-per-
+minute Recovery workload cannot simply be described as the radio reporting a
+known PM failure once per minute.
+
+The host heuristic and the known WF200 error channel are separate.
+
+---
+
+# What `.88` and `.237` Add
+
+`.88` and `.237` help separate the remaining fresh C-C behavior.
+
+`.88`:
+
+```text
+C-C
+WF200 3.16.1
+~9.9 days
+beacon_err = 0
+```
+
+`.237`:
+
+```text
+C-C
+WF200 3.18.0
+~15.2 h
+~29.96 Recoveries/hour
+```
+
+This difference is interesting but not yet sufficient to assign causality to
+the WF200 version.
+
+Other differences between the physical devices and RF environments remain.
+
+Longer observation is required.
+
+---
+
+# What `.234` Adds
+
+`.234` tests the complete corrected integration:
+
+```text
+A1
++
+C-C
++
+WF200 3.18.0
+```
+
+The first question was not battery life.
+
+It was:
+
+```text
+Does the integrated firmware still work correctly?
+```
+
+The answer after the initial hardware qualification is yes.
+
+The next question is:
+
+```text
+Does it remain stable over days?
+```
+
+and finally:
+
+```text
+Does it materially improve battery endurance?
+```
+
+Those later questions require more runtime.
+
+---
+
+# Further Recovery Rate Limiting
+
+The current C-C behavior is not intended to define the final optimal Recovery
+frequency.
 
 Approximately:
 
 ```text
-14 days
+30 Recoveries/hour
 ```
 
-or longer is preferable when practical.
+is a consequence of the current measurement cadence and the requirement for a
+fresh post-Recovery baseline.
 
----
+Further rate limiting is a possible future experiment.
 
-# 39. Same-Device A/B Testing
+No technically justified minimum Recovery frequency has yet been established.
 
-A same-device comparison is scientifically valuable because it removes some
-hardware variation.
-
-Conceptually:
+Possible future experiments could compare different minimum intervals, for
+example:
 
 ```text
-Phase A
-
-same TRV
-stock 2.2.4
-same physical location
-same network
-documented battery
+current C-C behavior
         |
         v
-Phase B
-
-same TRV
-Patch C-C
-same physical location
-same network
-same battery if practical
+moderate rate limit
+        |
+        v
+stronger rate limit
+        |
+        v
+Recovery disabled
 ```
 
-However, this still cannot perfectly control:
+The actual values should be chosen from runtime evidence rather than selected
+arbitrarily.
 
-- battery state between phases
-- heating demand
-- ambient temperature
-- motor workload
-- RF environment over time
+The main unknown is still:
 
-Same-device testing is therefore stronger than simple cross-device comparison,
-but not equivalent to laboratory power measurement.
+> What real WF200 condition, if any, does fresh low `real_beacon_skip` actually
+> identify?
+
+Until that is better understood, Recovery frequency should not be optimized
+from Recovery wall-clock occupancy alone.
 
 ---
 
-# 40. Direct Electrical Measurement
+# Direct Electrical Measurement
 
-Battery percentage and voltage are weak tools for measuring short-duration
-events.
+Direct current measurement would provide the strongest answer to several
+remaining questions.
 
-A direct current experiment could synchronize:
-
-```text
-supply current
-WUP
-debug output
-WLAN state
-Recovery event
-motor movement
-```
-
-This could distinguish:
+A synchronized measurement could compare:
 
 ```text
 normal idle
-```
-
-from:
-
-```text
 Recovery
+valve movement
+WLAN reconnect
+PM transition
 ```
 
-and potentially from:
+and potentially correlate:
 
 ```text
-persistent sleep-resource retention
+current
++
+WUP
++
+debug log
++
+WF200 state
 ```
 
-Such a test would provide much stronger evidence for event-level energy cost.
+No such measurement is currently part of this project.
 
-No laboratory-grade current measurement is currently part of the established
-dataset.
+The current investigation intentionally focuses on firmware behavior and
+long-term battery telemetry.
 
-Therefore no exact:
+Therefore no exact values should currently be assigned for:
 
 ```text
-mA
+Recovery current
+mAh per Recovery
 mAh/day
-battery-life reduction
+energy saved by C-C
+energy saved by A1
+energy saved by WF200 3.18.0
 ```
-
-should be assigned to the identified mechanisms.
 
 ---
 
-# 41. Battery Logger Priorities
+# Data Interpretation Rules
 
-The logger should continue recording:
+## Use
 
-```text
-timestamp
-firmware
-battery percentage
-battery voltage
-uptime
-RSSI
-diagnostic availability
-Recovery statistics
-```
-
-Where technically reliable, it should additionally retain:
-
-```text
-motor_steps_raw
-motor_steps_delta
-motor_steps_total_interval
-movement_count
-```
-
-For Patch C-C testing, useful additional fields include:
-
-```text
-real_beacon_skip
-desired_beacon_skip
-received beacon count
-Recovery counter
-```
-
-The logger should preserve raw data so future interpretation can change without
-losing the original observations.
-
----
-
-# 42. Data Interpretation Rules
-
-## Do
-
-- use direct TRV status as the primary battery source
-- record both percentage and voltage
-- retain firmware identity
-- retain uptime
-- record RSSI
-- record Recovery statistics where available
-- document mDNS patch configuration
-- retain motor workload where reliable
-- document reboots
-- document firmware changes
-- document battery recharge events
-- document device relocation
-- split intervals at firmware transitions
-- compare long-term trends
-- retain raw data
-- distinguish mechanism behavior from energy conclusions
+- direct TRV battery status as the primary device telemetry source
+- voltage as the primary battery trend
+- percentage as secondary battery information
+- firmware identity for every interval
+- WF200 firmware identity where relevant
+- uptime to identify test boundaries
+- reboot and reconnect counters
+- RSSI
+- valve and motor workload
+- Recovery statistics
+- raw cumulative counters
+- long observation periods
+- one stock control where practical
+- separate T0 records for each device
+- separate API and external voltage measurements
+- explicit documentation of recharge events
+- explicit documentation of OTA / firmware transitions
 
 ## Do Not
 
-- rank firmware solely by percentage decline
-- rank firmware solely by short-term voltage decline
-- assume equal battery capacity across physical devices
-- treat RSSI as proof of BSSID
-- treat desired beacon skip as actual measured radio behavior
-- convert Recovery counts directly to mAh
-- assume Patch A is the preferred final Recovery fix
-- assume Patch B fixes battery drain
-- assume A+B is the preferred final patch
-- assume Patch C-C improves battery life before hardware data exist
-- classify 2.1.0 as proven low-power baseline
-- classify 2.1.3 as known-good
-- combine mixed-firmware intervals
-- attribute the `.77` Patch-B test to the older −58/−59 dBm observation
-- claim that the historical battery-drain problem is solved
+- convert Recovery wall-clock percentage into battery percentage
+- convert Recovery count directly into mAh
+- treat `real_beacon_skip` as WF200 sleep telemetry
+- treat `desired_beacon_skip` as proof of physical radio behavior
+- treat `sleep_ratio` as direct electrical duty cycle
+- mix external-meter voltage with API voltage in one trend
+- compare devices solely by battery percentage
+- extrapolate battery lifetime from a few hours of voltage decline
+- ignore calibration or valve movement
+- combine intervals across firmware changes
+- assume equal battery capacity between devices
+- claim mDNS is the root cause from the current data
+- claim Beacon Recovery is the root cause from the current data
+- claim WF200 3.18.0 fixes the complete battery problem
+- claim A1 improves battery endurance before long-term data exist
+- claim D3=0 proves the WF200 was physically sleeping correctly
 
 ---
 
-# 43. Evidence Summary
+# Current Findings
 
-| Finding | Classification |
-|---|---|
-| Stock 2.2.4 can repeatedly enter Beacon Recovery | **PROVEN** |
-| Approximately one Recovery/minute has been observed | **PROVEN** |
-| C2 can sustain the recurring Recovery loop | **PROVEN** |
-| C1a native signed behavior exists | **PROVEN** |
-| C1a is a genuine control-validity defect | **STRONGLY SUPPORTED** |
-| Stock baseline can survive invalid measurement intervals | **PROVEN** |
-| C1b is a genuine measurement-validity defect | **STRONGLY SUPPORTED** |
-| Exact cause of first field Recovery trigger | **UNKNOWN** |
-| Periodic mDNS occurs in 2.1.3 at ~60 s | **PROVEN** |
-| Periodic mDNS occurs in stock 2.2.4 at ~180 s | **PROVEN** |
-| Comparable periodic mDNS was observed in 2.1.0 test window | **UNKNOWN; none was observed during that finite window** |
-| Patch B capture suppressed targeted periodic mDNS traffic | **PROVEN** |
-| Beacon Recovery remains with Patch B | **PROVEN** |
-| Patch A suppresses targeted Recovery | **PROVEN under tested conditions** |
-| Patch A correctly repairs C1a/C1b/C2 | **UNKNOWN; it bypasses Recovery instead** |
-| A+B suppressed both targeted recurring behaviors during monitored runtime | **PROVEN** |
-| A+B improves long-term battery endurance | **UNKNOWN** |
-| Patch C-C passed static pre-build qualification | **PROVEN as project qualification status** |
-| Patch C-C runtime correctness | **UNKNOWN** |
-| Patch C-C battery improvement | **UNKNOWN** |
-| Recovery suppression alone eliminates all battery decline | **UNKNOWN; historical observations demonstrate it is insufficient as a general conclusion** |
-| Periodic mDNS is a major battery-drain contributor | **UNKNOWN** |
-| WUP/EM2 behavior materially contributes to field battery drain | **UNKNOWN** |
-| RSSI alone explains battery drain | **UNKNOWN** |
-| Static IP/DHCP explains battery drain | **UNKNOWN** |
-| Historical battery drain has been solved | **UNKNOWN** |
+The battery investigation currently supports the following statements.
+
+### Stock Beacon Recovery can become persistent
+
+Multiple devices have shown approximately:
+
+```text
+~60 Recoveries/hour
+```
+
+for extended periods.
 
 ---
 
-# 44. Current User-Level Interpretation
+### The stock stale-Recovery loop is a host-side defect
 
-## Stock 2.2.4
-
-```text
-Periodic mDNS:
-present
-
-Beacon Recovery:
-can become persistent
-
-Battery impact:
-not quantitatively isolated
-```
-
-## Patch A
-
-```text
-Targeted Recovery suppression:
-confirmed under tested conditions
-
-Underlying validity semantics:
-not corrected
-
-Role:
-historical mechanism-isolation patch
-
-Battery improvement:
-unknown
-```
-
-## Patch B
-
-```text
-Targeted periodic mDNS suppression:
-strongly supported by runtime capture
-
-Beacon Recovery:
-remains stock
-
-Role:
-mDNS-isolation patch
-
-Battery improvement:
-unknown
-```
-
-## Patch A+B
-
-```text
-Both targeted recurring mechanisms:
-suppressed during monitored runtime
-
-Normal operation:
-observed
-
-Role:
-historical combined isolation experiment
-
-Long-term battery improvement:
-unknown
-```
-
-## Patch C-C
-
-```text
-Purpose:
-correct C1a / C1b / C2 while preserving legitimate Recovery
-
-Static pre-build qualification:
-passed
-
-Hardware qualification:
-pending
-
-Battery improvement:
-unknown
-```
+Patch C-C corrects the stale-evidence lifecycle while preserving fresh
+Recovery.
 
 ---
 
-# 45. Current Research Priorities
+### Patch C-C operates on physical hardware
 
-The current priorities are:
+C-C is no longer only a static design.
 
-1. preserve the historical Patch-A/Patch-B/A+B isolation dataset
-2. continue the existing long-term battery logging
-3. retain motor workload where technically reliable
-4. keep `.229` as an unmodified stock 2.2.4 reference where practical
-5. build Patch C-C using a growth-aware GBL process
-6. independently verify the generated firmware/container before flashing
-7. perform controlled Patch C-C hardware qualification
-8. verify legitimate Recovery remains possible after a fresh qualifying event
-9. verify the C2 stale-state recurrence is removed
-10. monitor network availability and PM restoration
-11. begin Patch C-C long-term battery observation only after functional
-    qualification
-12. keep Patch B as the isolated mDNS comparison
-13. consider a combined Patch-B + Patch-C-C experiment only after C-C has been
-    independently qualified
-14. avoid premature battery-life claims
-15. continue investigating older inherited drain mechanisms separately
+Hardware testing has demonstrated the corrected behavior.
 
 ---
 
-# 46. Current Experimental Pipeline
+### Fresh Recovery can remain after C-C
 
-The current project state is:
+This is expected.
 
-```text
-Static reverse engineering
-        |
-        v
-C1a / C1b / C2 identified
-        |
-        v
-Patch C-C designed
-        |
-        v
-independent static falsification
-        |
-        v
-static pre-build qualification PASSED
-        |
-        v
-growth-aware experimental build
-        |
-        v
-independent binary / GBL verification
-        |
-        v
-controlled hardware qualification
-        |
-        v
-long-term battery comparison
-```
+Fresh qualifying measurements can still trigger Recovery.
 
-In parallel:
+The current measurement cadence can produce approximately:
 
 ```text
-Patch B
-        |
-        v
-mDNS isolation
-        |
-        v
-long-term battery observation
+~30 Recoveries/hour
 ```
 
-Historical:
-
-```text
-Patch A / A+B
-        |
-        v
-mechanism-isolation evidence
-```
+when every fresh estimate continues to qualify.
 
 ---
 
-# 47. Current Scientific Interpretation
+### `.77` reached a complete discharge with mDNS isolation active
 
-The current evidence does not support a single-cause battery-drain model.
+The final observed endpoint was approximately:
 
-Instead, several independently identified mechanisms may contribute.
+```text
+9.23 days
+0 %
+3.116 V
+12908 Recoveries
+~58.27 Recoveries/hour
+```
 
-Periodic mDNS is a real recurring network workload.
+This does not prove Recovery caused the discharge.
 
-Beacon Recovery is a real additional 2.2.4 workload and can become
-self-sustaining through C2.
-
-C1a and C1b can create invalid control evidence under reachable conditions.
-
-Historical battery decline before 2.2.4 demonstrates that Beacon Recovery alone
-cannot explain the complete problem.
-
-The WUP/EM2 candidate remains unresolved.
-
-Valve workload, battery condition and RF environment remain substantial
-confounding variables.
-
-Therefore the strongest current statement is:
-
-> Multiple firmware mechanisms with plausible energy relevance have been
-> identified, but their individual and combined quantitative contributions to
-> Shelly TRV Gen1 battery drain have not yet been established.
-
-Patch C-C is the current preferred Beacon-Recovery correction candidate because
-it attempts to preserve legitimate Recovery rather than simply disabling the
-mechanism.
-
-Its static design has passed pre-build qualification.
-
-Its runtime and battery behavior remain to be established on hardware.
+It does show that targeted periodic mDNS suppression alone did not prevent the
+observed drain on this device.
 
 ---
 
-# 48. What Has Been Established
+### `.11` produced thousands of Recoveries without D3 PM errors
 
-The project has established that:
+At approximately:
 
-- stock 2.2.4 can enter persistent Beacon Recovery
-- the persistent C2 recurrence exists in host control flow
-- C1a signed-value behavior exists
-- baseline-age validity problems exist in the stock measurement design
-- periodic mDNS exists before 2.2.4
-- 2.1.3 shows approximately 60-second periodic mDNS
-- stock 2.2.4 shows approximately 180-second periodic mDNS
-- Patch B suppresses the targeted periodic mDNS traffic during the tested window
-- Patch B does not remove Beacon Recovery
-- Patch A suppresses targeted Recovery
-- A+B can suppress both targeted recurring behaviors during monitored runtime
-- suppression of Beacon Recovery alone does not guarantee absence of observed
-  battery decline
-- historical drain existed before the 2.2.4-specific Recovery mechanism
-- Patch C-C has passed static pre-build qualification
+```text
+63.93 h
+```
+
+the device showed:
+
+```text
+3835 Beacon Recoveries
+0 D3 PS_MODE_ERROR
+```
+
+The Shelly Recovery heuristic therefore cannot be treated as equivalent to the
+known direct WF200 PM-error channel.
 
 ---
 
-# 49. What Has Not Been Established
+### WF200 3.18.0 does not remove the stock host stale-Recovery loop
 
-The project has not established:
+Stock host behavior with WF200 3.18.0 still showed the recurring Recovery loop.
 
-- exact mAh/day consumed by periodic mDNS
-- exact mAh/day consumed by Beacon Recovery
-- exact battery-life improvement from Patch B
-- exact battery-life improvement from Patch A
-- exact battery-life improvement from A+B
-- Patch C-C runtime correctness
-- Patch C-C battery improvement
-- exact cause of the first field Recovery trigger
-- exact contribution of WUP/EM2 behavior
-- that one firmware mechanism explains all historical drain
-- that static IP or DHCP materially affects battery endurance
-- that RSSI alone explains battery endurance
-- that AP selection explains persistent Recovery
-- that the historical battery-drain problem has been solved
+This is expected because C2 is host logic.
 
 ---
 
-# 50. Current Conclusion
+### A1 + C-C + WF200 3.18.0 boots and operates on real hardware
 
-The long-term battery investigation has progressed from simple firmware
-comparison to mechanism-level analysis.
+The integrated `.234` test successfully reached normal WLAN, cloud, thermostat,
+valve and PM operation.
 
-The early experiments established two recurring workloads:
+No additional reboot or reconnect occurred during the initial approximately
+eight-hour qualification interval.
 
-```text
-periodic mDNS
-```
+---
 
-and:
+### Long-term battery improvement is still open
 
-```text
-2.2.4 Beacon Recovery
-```
+The integrated firmware has passed its initial functional gate.
 
-Patch B successfully isolates the first under the tested conditions.
+Its long-term battery effect has not yet been established.
 
-Patch A historically isolated the second by bypassing Recovery.
+---
 
-The later reverse engineering changed the interpretation of Beacon Recovery
-substantially.
+# Current Long-Term Test Plan
 
-The current model separates:
+The preferred next phase is:
 
 ```text
-C1a
-control-value validity
-
-C1b
-measurement-window validity
-
-C2
-post-Recovery freshness
+one stock 2.2.4 control
+        |
+        +
+multiple corrected devices
+A1 + C-C + WF200 3.18.0
 ```
 
-C2 explains how recurring Recovery can become self-sustaining.
+where practical.
 
-Patch C-C is designed to correct these semantics while preserving legitimate
-Recovery and diagnostic state.
+Devices should be:
 
-It has passed static pre-build qualification but has not yet completed hardware
-qualification.
+- charged separately
+- assigned individual T0 records
+- left in normal heating operation
+- kept on unchanged firmware during the interval
+- sampled approximately once per day
+- monitored for reboots and reconnects
+- compared using voltage primarily
+- compared using percentage secondarily
+- normalized qualitatively for valve workload and RF conditions
 
-The battery data must therefore continue to be interpreted conservatively.
-
-Historical observations already show that:
+The corrected firmware should first demonstrate:
 
 ```text
-Recovery suppression
+days of stable operation
 ```
 
-is not equivalent to:
+and then:
 
 ```text
-complete battery-drain solution
+reproducible battery behavior
 ```
 
-and that:
+before any battery-life claim is made.
+
+---
+
+# Current Research Questions
+
+The main remaining battery questions are:
+
+1. Does A1 + C-C + WF200 3.18.0 materially reduce long-term voltage decline?
+
+2. Does the result reproduce across more than one physical TRV?
+
+3. How does the corrected stack compare with the contemporaneous stock 2.2.4
+   control?
+
+4. Does the approximately 30/hour fresh C-C Recovery behavior persist over
+   longer periods?
+
+5. Why does `.88` show no Recovery while `.237` and `.234` show frequent fresh
+   Recovery?
+
+6. Does WF200 3.18.0 influence the fresh host beacon-density estimate?
+
+7. Does A1 change battery behavior independently of C-C?
+
+8. What real WF200 condition, if any, is represented by fresh
+   `real_beacon_skip = 1/2`?
+
+9. Does Beacon Recovery actually correct that condition?
+
+10. How far can Recovery frequency be reduced without allowing a real
+    high-power fault, if one exists, to remain active for too long?
+
+11. How much of the historical drain predating 2.2.4 remains after the known
+    host and radio corrections?
+
+---
+
+# Current Conclusion
+
+The battery investigation has moved beyond comparing firmware versions by
+percentage decline.
+
+Several concrete firmware behaviors are now understood.
+
+Stock 2.2.4 can enter an approximately once-per-minute Beacon Recovery loop.
+
+The stale-evidence mechanism behind that loop has been identified and corrected
+by Patch C-C.
+
+Device `.77` has now provided a complete discharge endpoint with the targeted
+periodic mDNS restart suppressed:
 
 ```text
-2.2.4 Beacon Recovery
+runtime             ~9.23 days
+battery             0 %
+voltage             3.116 V
+Beacon Recoveries   12908
+Recovery rate       ~58.27/hour
 ```
 
-cannot explain battery drain observed on earlier firmware.
-
-The current research objective is no longer simply:
+The device therefore spent approximately:
 
 ```text
-Can identified workloads be disabled?
+17.93 hours
 ```
 
-It is:
+or:
 
 ```text
-Can the identified defects be corrected without damaging legitimate behavior,
-and does doing so produce a reproducible improvement in real-world battery
-endurance?
+8.09% of its runtime
 ```
 
-That question remains open.
+inside the explicit approximately five-second Recovery intervals.
+
+This is a wall-clock measurement, not an energy percentage.
+
+The D3 observer provides a second important result:
+
+```text
+~63.93 h
+3835 Beacon Recoveries
+0 D3 PS_MODE_ERROR
+```
+
+The repeated Shelly Recovery mechanism therefore does not correspond to a
+sequence of known WF200 D3 PM errors in the observed test.
+
+Patch C-C removes the demonstrated stale self-trigger loop while retaining
+fresh Recovery.
+
+With the current measurement cadence, fresh Recovery can occur approximately
+every two minutes, giving a theoretical current-cadence maximum around:
+
+```text
+30/hour
+```
+
+or approximately:
+
+```text
+2.5 minutes/hour
+4.17% wall-clock Recovery occupancy
+```
+
+The current integrated `.234` test observed approximately:
+
+```text
+27.2/hour
+```
+
+during its initial multi-hour interval.
+
+That rate is not considered optimized.
+
+Further Recovery rate limiting is under consideration, but no technically
+justified minimum frequency has yet been established.
+
+Reducing Recovery frequency has two possible effects:
+
+```text
+fewer Recoveries
+        |
+        v
+less known Recovery overhead
+```
+
+but, hypothetically:
+
+```text
+less frequent Recovery
+        |
+        v
+longer lifetime of an unknown WF200 fault
+if Recovery is actually correcting one
+```
+
+The existence of such a non-D3 fault has not been demonstrated.
+
+For that reason, Recovery is currently retained conservatively for fresh valid
+measurements.
+
+The latest integrated firmware combines:
+
+```text
+A1
++
+Patch C-C
++
+WF200 3.18.0
+```
+
+A1 corrects identified host PM and transport lifecycle defects.
+
+C-C corrects Beacon Recovery evidence handling.
+
+WF200 3.18.0 contains Silicon Labs' fix for an error that could prevent the
+device from sleeping after a power-save mode change.
+
+The integrated firmware has successfully completed its initial hardware
+qualification on `.234`.
+
+It boots, initializes WF200 3.18.0, associates with WLAN, obtains DHCP, reaches
+the cloud, performs PM transitions, calibrates and controls the valve.
+
+No additional reboot or reconnect occurred during the initial approximately
+eight-hour qualification period.
+
+The remaining question is now primarily empirical:
+
+> Does correcting these demonstrated host-side defects and using the newer
+> WF200 firmware produce a reproducible improvement in real-world battery
+> endurance?
+
+That requires the long-term test.
+
+No battery-life improvement is claimed yet.
 
 ---
 
 # Related Documents
 
-Firmware chronology:
-
-[`../reverse-engineering/firmware-comparison.md`](../reverse-engineering/firmware-comparison.md)
-
-Power management:
+Power-management analysis:
 
 [`../reverse-engineering/power-management-and-sleep.md`](../reverse-engineering/power-management-and-sleep.md)
+
+Beacon Recovery:
+
+[`../reverse-engineering/recovery-mechanism.md`](../reverse-engineering/recovery-mechanism.md)
+
+`real_beacon_skip`:
+
+[`../reverse-engineering/real-beacon-skip.md`](../reverse-engineering/real-beacon-skip.md)
 
 Beacon RX counter:
 
 [`../reverse-engineering/beacon-rx-counter.md`](../reverse-engineering/beacon-rx-counter.md)
 
-Real beacon skip:
+Firmware comparison:
 
-[`../reverse-engineering/real-beacon-skip.md`](../reverse-engineering/real-beacon-skip.md)
-
-Beacon Recovery:
-
-[`../reverse-engineering/recovery-mechanism.md`](../reverse-engineering/recovery-mechanism.md)
+[`../reverse-engineering/firmware-comparison.md`](../reverse-engineering/firmware-comparison.md)
 
 AP selection and roaming:
 
@@ -2420,15 +2476,33 @@ Patch documentation:
 The battery investigation uses telemetry and runtime behavior from personally
 owned Shelly TRV Gen1 devices.
 
-The dataset is observational and contains uncontrolled variables.
+The dataset is observational.
 
-It must not be represented as laboratory-grade power characterization.
+It is not a laboratory-grade electrical characterization.
 
-Firmware identity is determined from the actual device state at the relevant
-timestamp.
+The project deliberately separates:
 
-Raw observations should be retained so conclusions can be re-evaluated as the
-firmware model improves.
+```text
+observed battery behavior
+```
+
+from:
+
+```text
+demonstrated firmware behavior
+```
+
+and from:
+
+```text
+hypotheses about electrical energy consumption
+```
+
+Raw observations should be retained so that battery conclusions can be
+re-evaluated as the firmware model improves.
+
+Firmware identity and measurement source should always be recorded with the
+corresponding observation.
 
 ---
 

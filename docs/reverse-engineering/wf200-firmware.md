@@ -1,11 +1,10 @@
-````markdown
 # WF200 Firmware and Power-Save Behavior
 
 ## Shelly TRV Gen1
 
 ## Scope
 
-This document describes the WF200 WLAN firmware used by the Shelly TRV Gen1, its evolution across the investigated Shelly firmware releases, and the relationship between radio-side power management and the host-side battery-drain investigation.
+This document describes the WF200 WLAN firmware used by the Shelly TRV Gen1, its evolution across the investigated Shelly firmware releases, and its relationship to the host-side battery-drain investigation.
 
 The main topics are:
 
@@ -13,22 +12,24 @@ The main topics are:
 - separation between host and radio power management
 - WF200 power-save modes used by the TRV
 - `PS_MODE_ERROR`
-- the D3 observer
+- the historical D3 observer
 - the relationship between D3 and Beacon Recovery
 - the experimental WF200 3.18.0 integration
 - the Silicon Labs 3.18.0 power-save fix
 - compatibility with Shelly FMAC 3.7.0
-- limits of what can currently be established about internal WF200 behavior
+- SEC relocation and qualification
+- the current B2.1/B2.1_OBS integration
+- the limits of what can currently be established about internal WF200 behavior
 
 The primary Shelly host firmware target is:
 
-```text
+```text id="brd3tt"
 20240619-130912/v2.2.4@ee290818
 ```
 
 The stock WLAN components in this release are:
 
-```text
+```text id="mfszzh"
 FMAC:
 3.7.0
 
@@ -36,13 +37,17 @@ WF200 firmware:
 3.16.1
 ```
 
-The project has additionally tested:
+The project additionally integrates the official:
 
-```text
+```text id="3g3gv9"
 WF200 3.18.0
 ```
 
-with the unchanged Shelly FMAC 3.7.0 host driver.
+radio firmware with the unchanged Shelly FMAC 3.7.0 host driver.
+
+The current research position remains conservative:
+
+> WF200 3.18.0 contains an official Silicon Labs fix in a directly relevant power-save area and has been demonstrated to operate on Shelly TRV Gen1 hardware, but it has not been proven to be the historical battery-drain root-cause fix.
 
 ---
 
@@ -52,7 +57,7 @@ The Shelly TRV Gen1 WLAN subsystem contains two important software layers.
 
 The EFM32GG11 host runs Shelly's application and FMAC-side control logic:
 
-```text
+```text id="5b4gpu"
 EFM32GG11
     |
     +-- Shelly application
@@ -64,7 +69,7 @@ EFM32GG11
 
 The WF200 runs its own protected firmware:
 
-```text
+```text id="mp0mwu"
 WF200
     |
     +-- radio operation
@@ -74,11 +79,11 @@ WF200
     +-- lower-level timing
 ```
 
-Communication between the two layers occurs through the WF200 host interface.
+Communication between these layers occurs through the WF200 host interface.
 
-This distinction is important throughout the battery investigation.
+This distinction is fundamental to the battery investigation.
 
-A host command requesting power save does not by itself prove that the WF200 physically entered the intended low-power state.
+A host request for power save does not prove that WF200 physically entered the intended low-power state.
 
 Likewise, a radio-side problem does not automatically imply that the EFM32GG11 host remained awake.
 
@@ -86,7 +91,7 @@ Likewise, a radio-side problem does not automatically imply that the EFM32GG11 h
 
 # 2. WLAN Firmware Evolution
 
-The investigated Shelly firmware generations use different combinations of FMAC and WF200 firmware.
+The investigated Shelly firmware generations use different FMAC and WF200 combinations.
 
 | Shelly firmware | FMAC | WF200 firmware |
 |---|---:|---:|
@@ -96,33 +101,31 @@ The investigated Shelly firmware generations use different combinations of FMAC 
 | 2.2.4 | 3.7.0 | 3.16.1 |
 | experimental 2.2.4 | 3.7.0 | 3.18.0 |
 
-This means WLAN behavior cannot be attributed only to changes in Shelly's application code.
+Therefore WLAN behavior cannot be attributed only to Shelly application changes.
 
-Between firmware generations, both:
+Across releases, both:
 
-```text
+```text id="kk2k4d"
 host-side FMAC
 ```
 
 and:
 
-```text
+```text id="h5ew4n"
 WF200 radio firmware
 ```
 
-can change.
+change.
 
 ---
 
-# 3. Why This Matters for Historical Battery Drain
+# 3. Historical Battery-Drain Relevance
 
-Battery-drain behavior has been observed on more than one Shelly firmware generation.
+Battery drain has been observed across more than one Shelly firmware generation.
 
-The relevant WLAN stack also changed over time.
+At the same time, the WLAN stack evolved:
 
-For example:
-
-```text
+```text id="txqhs6"
 2.1.0
 FMAC 3.3.2
 WF200 3.12.2
@@ -140,14 +143,14 @@ FMAC 3.7.0
 WF200 3.16.1
 ```
 
-Therefore a battery-runtime change between Shelly firmware releases can potentially involve:
+A runtime difference between Shelly releases can therefore involve:
 
 - Shelly application behavior
 - FMAC behavior
 - WF200 firmware behavior
-- interaction between those layers
+- interaction between these layers
 
-The project does not currently attribute the historical drain to one WLAN firmware component alone.
+The project does not currently attribute historical battery drain to one WLAN firmware component alone.
 
 ---
 
@@ -155,25 +158,23 @@ The project does not currently attribute the historical drain to one WLAN firmwa
 
 During normal connected operation, the Shelly host configures WF200 power-management behavior.
 
-Firmware logs and native control-flow reconstruction show several host-visible PM states.
+The normal connected Fast Power Save configuration is commonly associated with Shelly:
 
-The normal connected Fast Power Save configuration is commonly associated with:
-
-```text
+```text id="3v3wqf"
 PM state 3
 ```
 
 while Beacon Recovery temporarily moves the WLAN configuration through:
 
-```text
+```text id="fl4o86"
 PM state 1
 ```
 
-before restoring the connected power-save policy.
+before restoring connected power saving.
 
-A simplified Recovery sequence is:
+A simplified sequence is:
 
-```text
+```text id="hrr2hu"
 connected Fast Power Save
         |
         v
@@ -190,19 +191,17 @@ restore policy
 PM state 3
 ```
 
-These state numbers describe the host-visible policy/control path.
+These are host-visible application/control states.
 
-They should not be treated as direct measurements of physical radio sleep residency.
+They are not direct physical radio sleep measurements.
 
 ---
 
 # 5. Desired Beacon Skip
 
-The host also configures a desired beacon-skip value according to RSSI.
+For firmware 2.2.4, the reconstructed RSSI policy is:
 
-For firmware 2.2.4, the reconstructed mapping is:
-
-```text
+```text id="qvo9pq"
 RSSI >= -69 dBm
     desired skip = 20
 
@@ -217,43 +216,33 @@ This is a requested WLAN power-save parameter.
 
 It must not be confused with:
 
-```text
+```text id="73o41t"
 real_beacon_skip
 ```
 
-which is a host-calculated estimator derived from WF200 beacon statistics.
-
-The two values have different origins and semantics.
+which is calculated by the host from WF200 statistics.
 
 ---
 
-# 6. `real_beacon_skip` Is Not a WF200 Sleep Readback
+# 6. `real_beacon_skip` Is Not WF200 Sleep Readback
 
-Firmware 2.2.4 obtains cumulative WF200 beacon statistics and calculates approximately:
+Firmware 2.2.4 obtains cumulative beacon statistics and calculates approximately:
 
-```text
+```text id="o06ebv"
 delta = current_received_beacons
       - previous_received_beacons
 
 real_beacon_skip = uint8_t(600 / delta)
 ```
 
-This value is later used by host Beacon Recovery logic.
+Despite its name, `real_beacon_skip` is not known to be:
 
-Despite the name:
-
-```text
-real_beacon_skip
-```
-
-is not known to be:
-
-- the actual programmed WF200 skip value
+- the actual programmed WF200 listen interval
 - a direct radio sleep-state readback
 - a physical beacon-skip measurement
 - a direct measure of WF200 sleep residency
 
-It is a host-derived value based on the received-beacon counter.
+It is a host-derived estimator.
 
 This distinction is important when interpreting `/stats`.
 
@@ -261,13 +250,13 @@ This distinction is important when interpreting `/stats`.
 
 # 7. WF200 Statistics Command
 
-The analyzed host path requests WF200 statistics using command:
+The analyzed host path obtains WF200 statistics using:
 
-```text
+```text id="0vhxom"
 0x66
 ```
 
-The returned data includes values corresponding to:
+Returned data includes information corresponding to:
 
 - received beacon count
 - missed beacon count
@@ -275,25 +264,25 @@ The returned data includes values corresponding to:
 
 The known `real_beacon_skip` calculation uses the cumulative received-beacon counter.
 
-The existence of other statistics in the response does not mean they participate in the known Recovery calculation.
+The existence of other fields in the response does not imply they participate in the known Recovery calculation.
 
 ---
 
 # 8. Beacon Recovery Is Host Logic
 
-The characteristic runtime message:
+The characteristic message:
 
-```text
+```text id="gsbo9n"
 minutes_tick: Beacon skip error! Attempt recovery
 ```
 
-originates from the Shelly host firmware.
+originates in Shelly host firmware.
 
-The decision is based on the host-side cached estimator and associated control flow.
+The Recovery decision is based on the host-side estimator and its cached measurement state.
 
-The known 2.2.4 defects include:
+Three demonstrated host-side validity defects are:
 
-```text
+```text id="l87qkp"
 C1a
 signed interpretation
 
@@ -304,9 +293,9 @@ C2
 stale control-evidence reuse
 ```
 
-These are host-side defects.
+These are Shelly host defects.
 
-They should not be described as defects inside WF200 firmware.
+They must not be attributed to WF200 firmware.
 
 ---
 
@@ -314,60 +303,56 @@ They should not be described as defects inside WF200 firmware.
 
 The phrase:
 
-```text
+```text id="9yom1j"
 Beacon skip error
 ```
 
-can easily be interpreted as though the WF200 explicitly reported a beacon-skip fault.
+can be misread as though WF200 directly reported an error.
 
-The reconstructed path does not support that interpretation.
-
-The host derives a value from cumulative beacon statistics and decides whether to enter Recovery.
+The reconstructed control flow does not support that interpretation.
 
 Therefore:
 
-```text
+```text id="j7tcs5"
 Beacon Recovery
 ```
 
 does not by itself establish:
 
-```text
-WF200 reported a power-save error
+```text id="i9yq0j"
+WF200 reported a PM error
 ```
 
 or:
 
-```text
+```text id="ujqprx"
 WF200 failed to sleep
 ```
 
 or:
 
-```text
-the radio missed the number of beacons implied by
-the diagnostic name
+```text id="u8ij3f"
+WF200 reported the number of skipped
+beacons implied by the diagnostic name
 ```
 
-The message reflects Shelly's interpretation of host-side statistics.
+The message reflects Shelly's host-side interpretation of beacon statistics.
 
 ---
 
 # 10. WF200 `PS_MODE_ERROR`
 
-The WF200 interface also contains a separate indication referred to here as:
+WF200 exposes a separate indication referred to here as:
 
-```text
+```text id="yd1j9w"
 PS_MODE_ERROR
 ```
 
-This is distinct from Shelly's Beacon Recovery decision.
-
-Firmware 2.2.4 contains host handling that can log information associated with this indication.
+Firmware 2.2.4 contains host-side handling for this indication.
 
 Four reason values were identified:
 
-```text
+```text id="7rt3ur"
 0
 1
 2
@@ -376,7 +361,7 @@ Four reason values were identified:
 
 The known interpretation is approximately:
 
-```text
+```text id="y32dku"
 Reason 0:
 PS-Poll timeout
     -> Fast Power Save
@@ -386,7 +371,7 @@ U-APSD timeout
     -> Fast Power Save
 
 Reason 2:
-buffered unicast persists for more than 8 beacons
+buffered unicast persists across consecutive beacons
     -> Fast Power Save
 
 Reason 3:
@@ -394,33 +379,32 @@ unstable beacon timing
     -> beacon-window compensation
 ```
 
-These conditions belong to a different diagnostic/control path than the host `real_beacon_skip` calculation.
+This is a different path from Shelly's `real_beacon_skip` estimator.
 
 ---
 
 # 11. Firmware 2.1.0 and D3
 
-The older 2.1.0 host firmware does not contain the same D3 handling path found in 2.2.4.
+The investigated 2.1.0 host firmware does not expose the same D3 handling behavior found in 2.2.4.
 
-This does not mean that the underlying WF200 can never produce the corresponding indication.
+This does not mean the underlying WF200 generation could never produce a corresponding condition.
 
-It means the investigated 2.1.0 host firmware does not expose the same handler behavior.
+It means the analyzed host firmware does not expose the same handler path.
 
-This is another example of why host-visible diagnostics must not be assumed to represent the complete internal radio state.
+Host-visible diagnostics therefore must not be treated as a complete representation of internal radio behavior.
 
 ---
 
-# 12. D3 Observer
+# 12. Historical D3 Observer
 
 A dedicated experimental firmware variant was built to observe the D3 / `PS_MODE_ERROR` path without changing normal Beacon Recovery behavior.
 
-The observer records:
+The observer recorded categories including:
 
-```text
+```text id="1cbn1d"
 D3_total
 
 header_only
-
 malformed
 
 reason0
@@ -429,84 +413,81 @@ reason2
 reason3
 
 reason_other
-
 unexpected_longer
 
 first snapshots
-
 last snapshots
 
 WF200 version / driver state
 ```
 
-The purpose was to answer a specific question:
+The specific question was:
 
-> Are the recurring Shelly Beacon Recovery events accompanied by known WF200 `PS_MODE_ERROR` indications?
+> Are recurring Shelly Beacon Recovery events accompanied by the known WF200 `PS_MODE_ERROR` indication?
 
 ---
 
 # 13. D3 Runtime Result
 
-A long-running D3 observer test on physical hardware produced approximately:
+A long-running hardware observation produced approximately:
 
-```text
+```text id="nvqeq7"
 uptime:
-63.9 hours
+~63.9 hours
 
-Beacon Recovery counter:
-3835
+Beacon Recovery:
+3835 events
 
 D3_total:
 0
 ```
 
-The host therefore executed thousands of Beacon Recovery events without the observer recording a D3 `PS_MODE_ERROR`.
+Therefore thousands of Shelly Beacon Recovery events occurred without an observed D3 `PS_MODE_ERROR`.
 
-This establishes that:
+The supported conclusion is:
 
-> The known WF200 `PS_MODE_ERROR` indication is not required for the recurring host Beacon Recovery behavior observed on this device.
+> The known WF200 `PS_MODE_ERROR` indication is not required for the recurring host Beacon Recovery behavior observed in that experiment.
 
 ---
 
 # 14. What the D3 Result Does Not Prove
 
-The D3 result must not be overinterpreted.
+The D3 result does not establish that:
 
-It does not establish that:
-
-```text
+```text id="xo6cb3"
 WF200 always entered sleep correctly
 ```
 
 or:
 
-```text
-WF200 had no internal power-management problem
+```text id="98ctkv"
+WF200 had no internal PM problem
 ```
 
 or:
 
-```text
+```text id="51yco2"
 the radio consumed normal current
 ```
 
 or:
 
-```text
-all possible WF200 error states are represented by D3
+```text id="gyo2wk"
+all possible internal WF200 PM failures
+are represented by D3
 ```
 
-The observer monitors one known host-visible indication.
+The observer monitored one known host-visible error channel.
 
-Internal radio behavior that does not produce this indication remains outside the observer's visibility.
+Internal behavior that does not generate this indication remains outside its visibility.
 
 ---
 
 # 15. D3 and Beacon Recovery Are Independent Evidence
 
-The experiment provides a useful separation:
+The historical experiment produced:
 
-```text
+```text id="2h76c3"
 Shelly host:
 Beacon Recovery = thousands
 
@@ -514,52 +495,57 @@ WF200 D3 observer:
 PS_MODE_ERROR = zero
 ```
 
-Therefore the two mechanisms should not be treated as synonymous.
+The two mechanisms must therefore not be treated as synonymous.
 
-The host can enter its Beacon Recovery path without receiving the known D3 error indication.
-
-This is consistent with the reverse engineering of the host Recovery decision, which is driven by the host-derived beacon estimator.
+This agrees with static host analysis showing that Beacon Recovery is driven by the host-derived beacon estimator.
 
 ---
 
 # 16. Limits of WF200 Reverse Engineering
 
-The Shelly host application can be analyzed directly because its ARM firmware is available inside the TRV update image.
+The Shelly host application can be reverse engineered directly because its ARM application firmware is contained in the TRV update image.
 
-The protected WF200 firmware is a different problem.
+WF200 firmware is a different case.
 
 The project can inspect:
 
-- firmware images distributed as WF200 SEC payloads
+- distributed SEC firmware images
 - version information
 - host commands
 - host-visible events
 - public interface behavior
 - runtime interaction
 - release information
-- binary placement and relocation requirements
+- binary placement
+- relocation requirements
 
-The project does not currently have a complete internal reverse engineering of the WF200 firmware itself.
+The project does not currently have a complete internal reverse engineering of WF200 firmware.
 
 Therefore statements such as:
 
-```text
+```text id="vyi214"
 WF200 remains awake because internal function X fails
 ```
 
-cannot currently be made from direct internal radio control-flow evidence.
+cannot currently be made from direct radio-firmware control-flow evidence.
 
 ---
 
-# 17. Why the WF200 Version Still Matters
+# 17. Why WF200 Version Still Matters
 
-Lack of full internal WF200 reverse engineering does not make radio firmware irrelevant.
+Lack of complete internal radio reverse engineering does not make WF200 firmware irrelevant.
 
-The WF200 firmware directly implements radio-side power-save behavior.
+WF200 firmware implements:
 
-A firmware release that changes that implementation can therefore materially change battery behavior even when the Shelly host application remains unchanged.
+- radio-side PM behavior
+- beacon processing
+- protocol timing
+- low-level sleep transitions
+- power-save state handling
 
-This is especially relevant when the vendor documents a fix in the same functional area under investigation.
+A vendor firmware release changing these mechanisms can materially affect battery behavior even if Shelly host code remains unchanged.
+
+This becomes especially relevant when a vendor release documents a fix in the same PM area under investigation.
 
 ---
 
@@ -567,118 +553,108 @@ This is especially relevant when the vendor documents a fix in the same function
 
 Silicon Labs released WF200 firmware:
 
-```text
+```text id="i3lob7"
 3.18.0
 ```
 
-on:
+with a directly relevant LMAC fix describing a case where the device could fail to sleep after a power-save mode change.
 
-```text
-2026-10-07
-```
+This is technically relevant to the TRV because the product performs repeated WF200 PM transitions.
 
-The release information contains a particularly relevant fix:
+The correct conclusion is:
 
-```text
-[LMAC] Fixed an error that was preventing the device
-from sleeping after a power-save mode change
-```
+> WF200 3.18.0 contains an official Silicon Labs correction for a failure class that could prevent radio sleep after a power-save mode transition.
 
-This directly concerns the class of behavior being investigated in the TRV.
-
-It is therefore a strong reason to test the newer radio firmware.
-
-It is not proof that the documented bug is the Shelly TRV Gen1 battery-drain root cause.
+It is not proof that this was the historical Shelly TRV battery-drain root cause.
 
 ---
 
 # 19. Why the 3.18.0 Fix Is Interesting
 
-The Shelly TRV repeatedly changes WLAN power-save configuration.
+The TRV performs PM transitions during events such as:
 
-Examples include:
-
-```text
+```text id="7ixf66"
 association
 connected PM setup
 Beacon Recovery
-temporary active state
+temporary Active mode
 return to Fast Power Save
 manual DTIM behavior
 other PM transitions
 ```
 
-The 3.18.0 release note specifically describes failure to sleep:
+The vendor fix concerns failure to sleep:
 
-```text
+```text id="s19phs"
 after a power-save mode change
 ```
 
-That makes the fix technically relevant to the TRV workload.
+That is a strong functional match to the investigation domain.
 
 The possible relationship is:
 
-```text
+```text id="wzt7tc"
 host changes WF200 PM state
         |
         v
-radio should enter new sleep behavior
+WF200 should enter new PM behavior
         |
         v
-older radio firmware may fail in some condition
+older radio firmware may fail
+under some condition
 ```
 
-But without internal radio evidence or a controlled reproduction of the vendor bug, this remains a relevant hypothesis rather than a demonstrated causal match.
+Without direct reproduction of the vendor defect or internal radio control-flow evidence, this remains a technically relevant candidate mechanism rather than a demonstrated causal match.
 
 ---
 
 # 20. Official WF200 3.18.0 SEC Image
 
-The experimental integration uses the official Silicon Labs WF200 3.18.0 SEC image:
+The integration uses the official Silicon Labs WF200 3.18.0 SEC image:
 
-```text
+```text id="m0fjy8"
 wfm_wf200_C0.sec
 ```
 
 Size:
 
-```text
+```text id="r9n8lz"
 312,400 bytes
 ```
 
 SHA-256:
 
-```text
+```text id="97f7ga"
 886d009b3852cb41f7c67c85de5c9bf2e6d67614e10d668b4fa1e18734078cb9
 ```
 
-The exact image identity is retained so that the experimental integration can be reproduced and independently verified.
+The exact image identity is retained for independent verification.
 
 ---
 
 # 21. Stock WF200 3.16.1 Placement
 
-In stock Shelly firmware 2.2.4, the protected WF200 firmware is embedded inside the application image.
+In stock Shelly firmware 2.2.4, the protected WF200 firmware is embedded inside the host application image.
 
-The stock radio payload belongs to the normal firmware construction and is loaded into the WF200 during initialization.
+The stock radio payload is loaded into WF200 during initialization.
 
-Replacing it is therefore not equivalent to simply changing a version string.
+Replacing it is therefore not equivalent to changing a version string.
 
-The embedded payload geometry and surrounding host application data must remain valid.
+The embedded payload geometry, references and surrounding host data must remain internally consistent.
 
 ---
 
-# 22. Why 3.18.0 Required Relocation
+# 22. Why WF200 3.18.0 Required Relocation
 
-The WF200 3.18.0 SEC image is larger than the stock embedded 3.16.1 payload.
+WF200 3.18.0 is larger than the stock embedded 3.16.1 SEC payload.
 
-It cannot simply overwrite the old region without affecting following application data.
+It therefore cannot overwrite the original source region without affecting subsequent application data.
 
-The experimental integration therefore relocates the radio payload.
+The experimental integration relocates the embedded SEC image.
 
-The relevant relocation is:
+Relevant source offsets are approximately:
 
-```text
+```text id="y9qlmy"
 old SEC offset:
 0x4C050
 
@@ -691,37 +667,36 @@ shift:
 
 The corresponding runtime destination remains:
 
-```text
+```text id="vpnr28"
 [0x1003D0, 0x1007D8)
 ```
 
-The loader/reset-copy relationship must therefore be preserved while the embedded source payload moves inside the application image.
+The loader/reset-copy relationship must therefore remain correct even though the embedded source payload moved.
 
 ---
 
 # 23. Relocation Fixups
 
-Moving the SEC payload requires updating every qualified reference to the relocated data.
+Moving the SEC image required updating every qualified source reference associated with the relocated payload.
 
-The final 3.18.0 integration contains:
+The final integration contains:
 
-```text
+```text id="xvwk3a"
 54 relocation fixups
 ```
-
-associated with the radio payload relocation.
 
 Qualification verified:
 
 - relocated SEC geometry
-- all qualified fixups
+- all qualified relocation references
 - loader boundaries
 - reset-copy boundaries
 - destination geometry
 - surrounding application data
 - second PROGRAM preservation
+- byte-for-byte SEC identity after extraction
 
-This is necessary because one missed pointer or size assumption could create a firmware image that appears structurally valid but fails during radio initialization.
+One incorrect pointer or size assumption could otherwise produce a structurally plausible image that fails during WLAN initialization.
 
 ---
 
@@ -729,19 +704,19 @@ This is necessary because one missed pointer or size assumption could create a f
 
 The experiment deliberately retains Shelly's stock:
 
-```text
+```text id="838tp0"
 FMAC 3.7.0
 ```
 
-Only the protected WF200 firmware is updated to:
+while updating only the radio firmware to:
 
-```text
-3.18.0
+```text id="dtbbpy"
+WF200 3.18.0
 ```
 
-The resulting combination is therefore:
+The resulting combination is:
 
-```text
+```text id="6xc5yv"
 Shelly host firmware 2.2.4
         |
         +-- FMAC 3.7.0
@@ -749,17 +724,17 @@ Shelly host firmware 2.2.4
         +-- WF200 3.18.0
 ```
 
-This is important because the experiment tests whether the newer radio firmware can operate with the existing Shelly host driver.
+This isolates the radio-firmware update while preserving Shelly's existing FMAC generation.
 
 ---
 
 # 25. Hardware Compatibility Result
 
-The experimental combination successfully initialized on a physical Shelly TRV Gen1.
+The combination initialized and operated successfully on physical Shelly TRV Gen1 hardware.
 
-Runtime logs showed:
+Runtime behavior included:
 
-```text
+```text id="3gn86s"
 FMAC 3.7.0
 WF200 3.18.0
 ```
@@ -767,37 +742,37 @@ WF200 3.18.0
 followed by successful:
 
 - WLAN initialization
-- scanning
+- scan
 - association
 - DHCP
-- cloud connection
+- cloud connectivity
 - power-save configuration
 - normal thermostat operation
 
-This provides physical evidence that:
+This establishes:
 
-> Shelly FMAC 3.7.0 can operate with the tested official WF200 3.18.0 image under the exercised TRV conditions.
+> Shelly FMAC 3.7.0 can operate with the tested official WF200 3.18.0 SEC image under the exercised TRV conditions.
 
-This is stronger than a purely static compatibility assumption.
+This is practical experimental interoperability.
+
+It is not an official Silicon Labs or Shelly compatibility qualification.
 
 ---
 
-# 26. Initial 3.18.0 Runtime Behavior
+# 26. Initial Standalone 3.18.0 Runtime
 
 An early standalone WF200 3.18.0 experiment successfully completed OTA installation and cold reboot.
 
-The radio initialized as:
+The device initialized:
 
-```text
+```text id="6p8pd1"
 FMAC 3.7.0
 WF200 3.18.0
 ```
 
-and normal WLAN/cloud operation remained available.
+and retained normal WLAN/cloud operation.
 
-Initial runtime statistics showed the expected transition toward connected power-save behavior.
-
-This established the basic feasibility of the radio update before it was incorporated into the later combined firmware.
+This established basic feasibility before the radio update was combined with the later host corrections.
 
 ---
 
@@ -805,102 +780,104 @@ This established the basic feasibility of the radio update before it was incorpo
 
 WF200 3.18.0 was later combined with the C-C Beacon Recovery correction.
 
-This is useful because C-C removes the known stale host Recovery loop.
+C-C removes the known host-side stale-evidence recurrence.
 
-The resulting configuration still shows fresh qualifying Beacon Recovery events.
+Fresh qualifying Recovery events still occurred during some historical periods, in approximately the:
 
-Observed rates have been in approximately the same order as:
-
-```text
-~30 events/hour
+```text id="ls2n12"
+~27–30 events/hour
 ```
 
-depending on the test device and period.
+range.
 
-This means:
+This establishes only that:
 
-> Updating the WF200 to 3.18.0 does not by itself eliminate every fresh host Beacon Recovery trigger.
+> WF200 3.18.0 does not automatically eliminate all fresh host-derived Beacon Recovery triggers.
 
-That does not establish whether the newer radio firmware improves sleep behavior or battery consumption in other ways.
+It does not show whether the new radio firmware improved physical radio sleep behavior in other ways.
 
 ---
 
-# 28. A1 + C-C + WF200 3.18.0
+# 28. Historical A1 + C-C + WF200 3.18.0
 
-The current integrated experimental platform combines:
+An earlier integrated experimental platform combined:
 
-```text
+```text id="4quh6k"
 A1
-    host PM lifecycle correction
-
++
 C-C
-    Beacon Recovery validity correction
-
++
 WF200 3.18.0
-    newer radio firmware
 ```
 
-The controlled-test artifact is:
+The historical artifact was:
 
-```text
+```text id="njhm9m"
 SHTRV-01_2.2.4_A1_C-C_WF200_3.18.0_EXPERIMENTAL.gbl
 ```
 
-The combination has successfully booted and operated on physical hardware.
+That platform successfully booted and operated on physical hardware.
 
-This allows host and radio corrections to be tested together while retaining the original Shelly FMAC generation.
+It was an important integration milestone.
+
+It is no longer the current corrected platform because A1 was later superseded by A1R and bounded B2 serialization was added.
+
+Historical results from this build remain valid historical evidence and must not be relabeled as A1R or B2.1.
 
 ---
 
-# 29. Integrated Artifact Identity
+# 29. Historical A1+C-C+WF200 Artifact Identity
 
+The historical integrated artifact had:
+
+```text id="ctfizh"
 GBL size:
-
-```text
 1,123,380 bytes
 ```
 
 GBL SHA-256:
 
-```text
+```text id="sa78x5"
 d91adb9138a528c090210f9a1776565fcfb55b17b2af7d8d46c83d8d1204e379
 ```
 
-Stored/calculated END CRC32:
+END CRC32:
 
-```text
+```text id="i75d9r"
 F01262BC
 ```
 
 Whole-file CRC32 residue:
 
-```text
+```text id="djlmfb"
 2144DF1C
 ```
 
 Application size:
 
-```text
+```text id="c2s8zd"
 1,066,544 bytes
 ```
 
 Application SHA-256:
 
-```text
+```text id="vwx9ad"
 0bb530cfda66b4c45ada8d864d623ff4f952405a4da0f8f00f368a9f6116030d
 ```
 
-The extracted WF200 payload in the final GBL was verified byte-for-byte against the official 3.18.0 SEC image.
+The embedded WF200 3.18.0 SEC payload was verified byte-for-byte against the official image.
+
+These identifiers belong to that historical A1-based build only.
 
 ---
 
-# 30. Fresh Recovery With 3.18.0
+# 30. Historical Fresh Recovery With WF200 3.18.0
 
-The integrated A1+C-C+WF200 3.18.0 test device continued to produce fresh Beacon Recovery events.
+The historical A1+C-C+WF200 3.18.0 test device continued to produce fresh Beacon Recovery events.
 
-Representative measurements were approximately:
+Representative historical measurements included approximately:
 
-```text
+```text id="nd2q4m"
 ~17.7 min:
 9 Beacon Recovery events
 
@@ -914,113 +891,111 @@ Representative measurements were approximately:
 909 events
 ```
 
-The longer periods correspond to roughly:
+The longer intervals corresponded to roughly:
 
-```text
+```text id="t4j4oj"
 27–28 events/hour
 ```
 
-The known C2 stale-evidence loop has already been removed by C-C.
+Because C-C had already removed the stale-evidence recurrence, these events required later fresh qualifying host measurements.
 
-These remaining events therefore require a fresh qualifying host measurement.
+They should not be interpreted as proof that WF200 3.18.0 failed to sleep.
 
 ---
 
 # 31. Good RSSI Does Not Eliminate Fresh Recovery
 
-Fresh Recovery continued even during periods of good WLAN signal.
+Historical fresh Recovery continued even with good WLAN signal.
 
 One representative period showed approximately:
 
-```text
-RSSI:
--56 dBm
+```text id="ps8gc7"
+RSSI = -56 dBm
 ```
 
-while Recovery continued.
+while fresh Recovery continued.
 
-Therefore weak RSSI is not a required condition for the remaining fresh trigger.
+Weak RSSI is therefore not required for the observed fresh trigger.
 
-This matches earlier observations from stock firmware.
+This does not exclude other AP-side timing effects.
 
 ---
 
 # 32. Mesh/Band Steering Is Not Required
 
-A controlled test disabled FRITZ!Box Mesh/Band Steering while leaving the experimental firmware otherwise unchanged.
+A historical controlled test disabled FRITZ!Box Mesh/Band Steering while keeping the experimental firmware otherwise unchanged.
 
-Beacon Recovery continued.
+Fresh Beacon Recovery continued.
 
-This establishes that the tested Mesh/Band-Steering behavior is not required for the fresh Recovery events seen on that device.
+Therefore the tested Mesh/Band-Steering behavior was not required for those Recovery events.
 
-It does not rule out all AP-side timing or roaming influences.
+This does not rule out every AP-side timing, roaming or RF interaction.
 
 ---
 
-# 33. Recovery Frequency Is Not a Direct Sleep Measurement
+# 33. Recovery Frequency Is Not Direct Sleep Measurement
 
-An important runtime observation is that similar Recovery frequency does not necessarily correspond to similar short-term battery-voltage decline.
+Similar Recovery frequency does not necessarily correspond to similar short-term battery-voltage behavior.
 
-During one period with the valve closed, the integrated test device showed only a small voltage change while Recovery continued at roughly the same rate.
+This reinforces:
 
-This reinforces an important distinction:
-
-```text
+```text id="lhw1ck"
 Recovery frequency
     !=
-direct radio awake time
+physical WF200 awake time
 ```
 
 and:
 
-```text
+```text id="cld3fc"
 Recovery frequency
     !=
-direct battery-energy measurement
+battery energy
 ```
 
-A Recovery event creates known host/radio activity.
+Each Recovery creates known host/radio activity.
 
-Its total energy impact depends on what the radio and host actually do before, during and after the transition.
+Its total energy impact depends on the states before, during and after the transition.
 
 ---
 
 # 34. WF200 Sleep Cannot Be Inferred From Host Logs Alone
 
-Host logs can show:
+Host telemetry can show:
 
-```text
-PS state 1
-PS state 3
-desired skip
+```text id="d5o5vy"
+PM state 1
+PM state 3
+desired_beacon_skip
 real_beacon_skip
 Beacon Recovery
 D3
+PM52 completion
 ```
 
-but none of these individually provides a complete physical radio sleep trace.
+None of these individually provides a complete physical RF sleep trace.
 
 For example:
 
-```text
+```text id="06a3s3"
 host requests state 3
 ```
 
 does not prove:
 
-```text
-WF200 remained asleep for the expected duration
+```text id="5vijtn"
+WF200 physically slept for the expected duration
 ```
 
-The 3.18.0 release note itself demonstrates why this distinction matters: a device can receive a power-save mode change while an internal radio-side defect prevents the expected sleeping behavior.
+The existence of the 3.18.0 vendor fix itself illustrates this distinction: a host can successfully request a PM change while an internal radio-side defect interferes with subsequent sleep behavior.
 
 ---
 
-# 35. Host Sleep Is Also Separate
+# 35. Host Sleep Is Separate
 
-The EFM32GG11 host has its own sleep architecture:
+The EFM32GG11 host has its own low-power architecture involving:
 
-```text
+```text id="f6pja4"
 B2
 B3
 EM1
@@ -1030,137 +1005,581 @@ PA8
 WFI
 ```
 
-A radio-side power-save problem and a host-side sleep problem can therefore coexist.
+A radio-side PM defect and a host-side sleep defect may therefore exist independently.
 
-Possible examples include:
+Examples include:
 
-```text
-host correctly reaches EM2
+```text id="h9a95r"
+host reaches intended EM2
 WF200 remains unexpectedly active
 ```
 
 or:
 
-```text
-WF200 correctly enters power save
+```text id="nmn0ti"
+WF200 enters intended power save
 host remains restricted to EM1
 ```
 
 or:
 
-```text
+```text id="dkjs1g"
 PA8 remains asserted
-host does not execute WFI
+host WFI is vetoed
 ```
 
-Battery investigation must therefore consider both processors.
+Battery analysis must therefore keep the two processors conceptually separate.
 
 ---
 
 # 36. PA8 Connects the Two Layers
 
-PA8 provides one important interaction between the WLAN side and host sleep.
+PA8 provides an important host/radio interaction.
 
-The EFM32GG11 checks the WLAN notification signal before executing WFI.
+The EFM32GG11 checks the WLAN notification signal before WFI.
 
 If PA8 is HIGH:
 
-```text
-host sleep is vetoed
+```text id="wm0hrw"
+host low-power entry is vetoed
 ```
 
-This means radio-side activity can indirectly prevent host low-power entry even when the host blocker selector would otherwise permit EM2.
+Radio-side activity can therefore indirectly prevent host sleep even when B2/B3 selection would otherwise permit EM2.
 
-The exact duration and runtime frequency of this condition are not yet established.
+PA8 HIGH is not automatically a defect.
+
+It can represent legitimate pending WLAN work.
 
 ---
 
 # 37. B2 Is Not a WF200 State
 
-The host B2 reference counter must also not be confused with radio state.
-
-B2 represents software ownership of an EFM32 sleep restriction.
+B2 represents software ownership of a host sleep restriction.
 
 Conceptually:
 
-```text
+```text id="jh61t3"
 B2 != 0
-    host must remain at EM1 or shallower
+    |
+    v
+host limited to EM1 or shallower
 ```
 
 It does not directly mean:
 
-```text
+```text id="iqyw95"
 WF200 awake
 ```
 
 Likewise:
 
-```text
+```text id="rjxnjy"
 B2 = 0
 ```
 
 does not prove:
 
-```text
+```text id="6ekcmf"
 WF200 asleep
 ```
 
-The later-discovered B2 concurrency defect is therefore a host-side problem separate from WF200 firmware.
+The demonstrated B2 race is therefore a host-side correctness defect separate from WF200 firmware.
 
 ---
 
-# 38. Why 3.18.0 Is Not Treated as a Root-Cause Proof
+# 38. B2 Serialization
 
-The release note is unusually relevant:
+Stock firmware contains a task-preemption race in shared B2 reference-counter updates.
 
-```text
+This can produce:
+
+```text id="z0a5mv"
+phantom B2 contribution
+```
+
+or:
+
+```text id="q7j0a6"
+lost B2 contribution
+```
+
+The correction uses bounded serialization of the complete relevant B2 read-modify-write operation while preserving reference-count semantics.
+
+This correction is included in the current B2.1 family.
+
+It does not modify WF200 firmware behavior.
+
+---
+
+# 39. Why WF200 3.18.0 Is Not Root-Cause Proof
+
+The vendor description is unusually relevant:
+
+```text id="c6slur"
 device not sleeping after a power-save mode change
 ```
 
-but matching terminology is not enough to establish causality.
+but terminology alone does not establish causality.
 
-To claim that the vendor fix is the historical TRV root cause, the project would need stronger evidence such as:
+A root-cause claim would require stronger evidence such as:
 
-- reproduction of the exact older WF200 failure
+- reproduction of the relevant 3.16.1 radio-side failure
 - disappearance of that failure under 3.18.0
-- controlled physical sleep or current measurements
-- a clear relationship to the historical drain
+- controlled physical current or sleep measurement
+- direct correlation with historical drain
 - exclusion of independent host-side causes
 
-Those conditions have not yet been met.
+Those conditions have not been met.
 
 The correct interpretation is:
 
-> WF200 3.18.0 contains a vendor-documented fix in a directly relevant power-save area and is therefore an important experimental variable.
+> WF200 3.18.0 contains a vendor-documented fix in a directly relevant PM area and is therefore an important component of the corrected experimental platform.
 
 ---
 
-# 39. Why 3.18.0 Still Belongs in the Corrected Platform
+# 40. Why 3.18.0 Remains in the Corrected Platform
 
-Even without root-cause proof, there is a practical reason to include the newer radio firmware in the experimental corrected platform.
+Even without root-cause proof, including 3.18.0 is technically justified.
 
-The project has already identified several host-side defects.
+The project has already demonstrated multiple host-side defects.
 
-Testing those host corrections against a radio firmware that contains a later vendor sleep fix reduces the chance of evaluating the corrected host against a known older radio-side defect class.
+Testing those corrected host paths against a newer radio firmware that contains a vendor PM/sleep correction reduces the risk of evaluating the host fixes against an older known radio-side defect class.
 
-The resulting platform is:
+The strategy is therefore:
 
-```text
-correct known host defects
+```text id="y69cfm"
+correct demonstrated host defects
         +
-test newer radio PM implementation
+use newer vendor radio PM implementation
 ```
 
-rather than assuming either side alone explains the entire problem.
+without claiming either side alone explains the historical problem.
 
 ---
 
-# 40. Current Experimental Model
+# 41. A1R
 
-The current WLAN power-management investigation can be represented as:
+The original A1 host PM correction was later found to introduce an experimental regression in verified temporary `request1` override paths.
 
-```text
+The corrected lifecycle implementation is:
+
+```text id="3tyzmb"
+A1R
+```
+
+A1R retains the A1 lifecycle corrections while correcting that experimental regression.
+
+It passed:
+
+```text id="7mo58q"
+151 / 151 Thumb behavior tests
+```
+
+together with broader retained-state and interaction qualification.
+
+This distinction matters because historical A1+WF200 3.18.0 runtime measurements must remain labeled as A1 results.
+
+---
+
+# 42. B2.1
+
+The current observer-free corrected integrated baseline is:
+
+```text id="mc8c2d"
+B2.1
+```
+
+containing:
+
+```text id="g2c8y7"
+A1R
++
+C-C
++
+B2 bounded serialization
++
+minimal MQTT PUBLISH guard
++
+WF200 3.18.0
+```
+
+From the WF200 perspective, the important component is still the same official 3.18.0 SEC image integrated with Shelly FMAC 3.7.0.
+
+---
+
+# 43. B2.1 Artifact Identity
+
+The B2.1 experimental artifact is:
+
+```text id="19wn7j"
+final/SHTRV-01_2.2.4_A1R_C-C_B2_MQTT_WF200_3.18.0_EXPERIMENTAL.gbl
+```
+
+Application:
+
+```text id="l6jxy5"
+size:
+1,066,776 bytes
+
+SHA-256:
+31ddd06a0229fee0b0b58dcbbd28ced1e4fbab0b6dc218c76c9d93673f4961e0
+
+CRC:
+24702EBF
+```
+
+GBL:
+
+```text id="q44ihn"
+size:
+1,123,612 bytes
+
+SHA-256:
+5f81869922c9b2eed4eb2f730ed53f5a66cf8b09d5f7d12205a4f6fbcd7392d9
+
+END CRC:
+F5429B7F
+
+CRC residue:
+2144DF1C
+```
+
+This is the corrected observer-free B2.1 artifact.
+
+---
+
+# 44. PM52→cmd66 Observer
+
+The current diagnostic observer records the relationship between host PM commands and the existing statistics path.
+
+It records:
+
+- actual PM52 payloads
+- native PM52 results
+- A1R completion decisions
+- existing periodic cmd66 requests/results
+- fresh estimator operands
+- connection epochs
+- a compact event ring
+- first-fault freeze state
+
+It sends no additional WF200 request.
+
+It adds no:
+
+```text id="cp5f9s"
+new timer
+new task
+new queue
+automatic network traffic
+flash write
+PM policy change
+```
+
+This is particularly important when investigating radio PM behavior because diagnostic instrumentation must not itself create additional WF200 transactions.
+
+---
+
+# 45. B2.1_OBS
+
+The current long-term hardware diagnostic build is:
+
+```text id="5im0ip"
+B2.1_OBS
+```
+
+defined as:
+
+```text id="7pxlz1"
+B2.1
++
+PM52 -> cmd66 observer
+```
+
+Its software qualification included:
+
+```text id="43ijbb"
+A1R:
+151 / 151
+
+observer/readout:
+356 / 356
+
+B2:
+2060 + mixed/preemption qualification
+
+plus:
+C-C qualification
+MQTT qualification
+decoder regressions
+deterministic construction
+independent GBL verification
+zero unexplained changes
+```
+
+The build disposition is:
+
+```text id="jo8nzb"
+B2.1_OBS RELEASE-CANDIDATE GO
+```
+
+This means qualified for controlled hardware observation.
+
+It does not mean production release or battery-drain root-cause proof.
+
+---
+
+# 46. B2.1_OBS Artifact Identity
+
+Artifact:
+
+```text id="0ip94q"
+builds/firmware/B2.1_OBS/SHTRV-01_2.2.4_B2.1_OBS_EXPERIMENTAL.gbl
+```
+
+Application:
+
+```text id="lmp59u"
+size:
+1,069,300 bytes
+
+SHA-256:
+65e17c4c04bdde23f545ebdb3283d71eef746e8dafba97ed9f6e451b6310c215
+
+CRC:
+EEE8DD82
+```
+
+GBL:
+
+```text id="sooplj"
+size:
+1,126,136 bytes
+
+SHA-256:
+7d7063d81372063dfe0d629d26e614f7dd2ed448b0e65a393e866c79025eac7a
+
+END CRC:
+12247888
+
+CRC residue:
+2144DF1C
+```
+
+The native Shelly firmware identity remains 2.2.4.
+
+The research identity is:
+
+```text id="it1gxr"
+research_build: B2.1_OBS
+```
+
+---
+
+# 47. Current Hardware Population
+
+The active long-term test population is:
+
+```text id="9ncuct"
+.77  -> B2.1_OBS
+.88  -> B2.1_OBS
+.11  -> B2.1_OBS
+.71  -> B2.1_OBS
+.234 -> B2.1_OBS
+.61  -> B2.1_OBS
+.97  -> stock 2.2.4 control
+```
+
+or:
+
+```text id="rqzeyi"
+6 × B2.1_OBS
+1 × stock 2.2.4 control
+```
+
+Early observation showed no Beacon Recovery errors on the B2.1_OBS devices during the first observed interval, while the stock control retained thousands of accumulated Beacon Recovery events.
+
+These are preliminary observations only.
+
+They are not long-term battery conclusions.
+
+---
+
+# 48. Current Research Decision
+
+The current decision is:
+
+```text id="h9g3xf"
+WAIT
+OBSERVE
+COLLECT VOLTAGE/RUNTIME DATA
+DO NOT CHANGE TEST VARIABLES
+```
+
+The project is therefore not currently:
+
+- replacing WF200 firmware again
+- changing FMAC
+- adding new WF200 instrumentation
+- changing AP/network conditions
+- rolling B2.2 onto the active devices
+- starting a new no-Recovery experiment
+
+The current phase is evidence collection.
+
+---
+
+# 49. If B2.1_OBS Develops Drain
+
+If a corrected device develops genuine rapid drain:
+
+```text id="r6tccd"
+capture first fault
+        |
+        v
+correlate PM52 and cmd66 telemetry
+        |
+        v
+check connection epoch / PM completion
+        |
+        v
+compare battery-voltage behavior
+        |
+        v
+resume deeper RE
+```
+
+This is the point at which a new WF200-specific hypothesis would become justified.
+
+---
+
+# 50. If B2.1_OBS Remains Stable
+
+If the corrected platform remains stable long term:
+
+```text id="0cqgpd"
+remove observer
+        |
+        v
+requalify observer-free corrected build
+        |
+        v
+hardware regression
+        |
+        v
+evaluate final candidate
+```
+
+The observer should not automatically become part of a final firmware candidate.
+
+---
+
+# 51. B2.2
+
+A later observer-free integrated build is:
+
+```text id="w1o5jl"
+B2.2
+```
+
+Its nine selected correction components are:
+
+```text id="xut7nw"
+1. A1R including A1 lifecycle correction
+2. C-C
+3. B2 bounded serialization
+4. minimal MQTT PUBLISH guard
+5. official WF200 3.18.0
+6. Calibration Restore Guard
+7. P01 PA3 release
+8. P02 I2C timeout retirement
+9. P03 GPIO interrupt-mask correction
+```
+
+Its current disposition is:
+
+```text id="h91mek"
+B2.2 OFFLINE RELEASE-CANDIDATE GO
+```
+
+No physical TRV was contacted during B2.2 qualification.
+
+Therefore B2.2 is not hardware-qualified.
+
+---
+
+# 52. B2.2 Artifact Identity
+
+Artifact:
+
+```text id="o66hh6"
+builds/firmware/B2.2/SHTRV-01_2.2.4_B2.2_EXPERIMENTAL.gbl
+```
+
+GBL:
+
+```text id="h5rr0h"
+size:
+1,126,156 bytes
+
+SHA-256:
+912983973a5467241397b9dd967ee0039440c7d77780a2a97ee494b1a507860c
+
+END CRC:
+52A97051
+
+CRC residue:
+2144DF1C
+```
+
+Application:
+
+```text id="rgri2c"
+final/SHTRV-01_2.2.4_B2.2_EXPERIMENTAL.bin
+
+size:
+1,069,320 bytes
+
+SHA-256:
+7ee593265c76abd8cd628a81133d4b1310c1ae24c9ebe2ca3f2c2948acfc64f9
+
+CRC:
+42657D97
+```
+
+The native version string remains:
+
+```text id="a4zd7v"
+20240619-130912/v2.2.4@ee290818
+```
+
+The build must therefore be identified by artifact filename/hash rather than native Shelly version reporting.
+
+---
+
+# 53. WF200 3.18.0 Across B2.1 and B2.2
+
+The same official 3.18.0 radio firmware remains part of:
+
+```text id="a91r4a"
+B2.1
+B2.1_OBS
+B2.2
+```
+
+This means the project is no longer changing radio firmware between these corrected build generations.
+
+The differences between B2.1 and B2.2 lie elsewhere in the host application.
+
+This helps preserve the radio side as a controlled variable during later comparison.
+
+---
+
+# 54. Current Experimental Model
+
+The current investigation can be represented as:
+
+```text id="i6ejxt"
 Shelly host
     |
     +-- Beacon estimator
@@ -1169,17 +1588,18 @@ Shelly host
     |      +-- C1b
     |      +-- C2
     |      |
-    |      +-- C-C correction
+    |      +-- C-C
     |
     +-- PM lifecycle
     |      |
     |      +-- G01/G02/G03/G05/G06/G18/G19
     |      |
-    |      +-- A1 correction
+    |      +-- A1R
     |
     +-- host sleep
            |
            +-- B2 race
+           +-- B2 serialization
            +-- B3 / EM2 policy
            +-- PA8 veto
 
@@ -1189,24 +1609,24 @@ WF200
     |
     +-- D3 / PS_MODE_ERROR
     |
-    +-- firmware 3.16.1
+    +-- stock 3.16.1
     |
-    +-- firmware 3.18.0
+    +-- experimental 3.18.0
            |
-           +-- vendor sleep-related fix
+           +-- vendor sleep-related correction
 ```
 
-No one branch currently explains every observed battery symptom.
+No single branch currently explains all historical battery symptoms.
 
 ---
 
-# 41. What Has Been Established
+# 55. What Has Been Established
 
 The current evidence supports the following conclusions.
 
 ### Shelly changed both FMAC and WF200 firmware across releases
 
-The WLAN stack evolved significantly between 2.1.0 and 2.2.4.
+The WLAN stack evolved significantly from 2.1.0 through 2.2.4.
 
 ### Beacon Recovery is host logic
 
@@ -1214,37 +1634,43 @@ The known Recovery decision is based on a host-derived estimator.
 
 ### `real_beacon_skip` is not direct WF200 sleep telemetry
 
-It is derived from cumulative received-beacon statistics.
+It is derived from received-beacon statistics.
 
 ### D3 is a separate WF200 error indication
 
-It is not the same mechanism as Shelly Beacon Recovery.
+It is not synonymous with Shelly Beacon Recovery.
 
 ### D3 is not required for recurring Recovery
 
-Thousands of Recovery events were observed with:
+Thousands of historical Recovery events were observed with:
 
-```text
+```text id="pn63ll"
 D3_total = 0
 ```
 
-on the D3 observer device.
+### WF200 3.18.0 contains a relevant vendor correction
 
-### WF200 3.18.0 contains a relevant vendor fix
-
-The release notes describe a failure that could prevent sleep after a power-save mode change.
+It addresses a failure class involving sleep after PM-mode changes.
 
 ### FMAC 3.7.0 and WF200 3.18.0 operate together on tested hardware
 
-The combination successfully initialized and maintained normal TRV connectivity and operation.
+Initialization, association, DHCP, cloud and PM behavior were demonstrated.
 
-### WF200 3.18.0 does not eliminate all fresh Beacon Recovery
+### WF200 3.18.0 does not itself remove all fresh host Recovery
 
-Fresh host Recovery events remain observable in C-C-based 3.18.0 configurations.
+Historical C-C-based configurations still produced fresh qualifying triggers.
+
+### B2.1 and B2.1_OBS use WF200 3.18.0
+
+The current corrected hardware experiment therefore already includes the newer radio firmware.
+
+### B2.2 also uses the same radio firmware
+
+B2.2 adds further host-side corrections but has not been hardware tested.
 
 ---
 
-# 42. What Has Not Been Established
+# 56. What Has Not Been Established
 
 The project does not currently claim:
 
@@ -1255,73 +1681,67 @@ The project does not currently claim:
 - that every radio sleep failure produces D3
 - that D3 covers every internal WF200 PM failure
 - that `real_beacon_skip` measures physical radio sleep
-- that desired beacon skip equals actual physical skip
-- that FMAC 3.7.0 is officially supported by Silicon Labs with every later WF200 firmware solely because the tested combination works
-- that the internal WF200 3.16.1 or 3.18.0 control flow has been completely reverse engineered
-- that current host logs provide direct radio sleep residency
+- that desired beacon skip equals physical skip behavior
+- that FMAC 3.7.0 is universally supported with every later WF200 image
+- that internal WF200 3.16.1 or 3.18.0 control flow has been completely reverse engineered
+- that host logs provide direct radio sleep residency
 - that the quantitative battery improvement from WF200 3.18.0 is known
+- that B2.2 has been hardware-qualified
+- that the historical battery-drain root cause has been proven
 
 ---
 
-# 43. Remaining Questions
+# 57. Remaining Questions
 
 Important open WF200 questions include:
 
-1. Does WF200 3.16.1 enter a persistent awake state after specific PM transitions?
+1. Does stock WF200 3.16.1 enter a persistent or extended awake condition after particular PM transitions?
 
-2. If so, does that state produce D3 or remain silent?
+2. If such a condition exists, is it visible through D3 or silent?
 
-3. Does WF200 3.18.0 eliminate such a state?
+3. Does WF200 3.18.0 eliminate such a condition?
 
-4. What exactly causes the remaining fresh host Beacon Recovery measurements?
+4. What exactly causes remaining fresh low host beacon-estimator values?
 
-5. Does PA8 remain asserted during any radio-side abnormal state?
+5. Does PA8 remain asserted during any radio-side abnormal condition?
 
-6. Can host-side B2 corruption and radio-side PM failure occur independently?
+6. How much time does WF200 physically spend in low-power states?
 
-7. How much time does the WF200 physically spend in low-power operation?
+7. What is the electrical cost of a Beacon Recovery sequence?
 
-8. What is the actual energy cost of a Beacon Recovery sequence?
+8. Does the newer radio firmware materially improve long-term battery endurance once demonstrated host defects are corrected?
 
-9. Does the newer radio firmware improve long-term battery endurance after host-side defects are corrected?
+9. If B2.1_OBS drains, does PM52→cmd66 first-fault telemetry point toward a radio-side transition problem?
 
-These questions require runtime evidence beyond static host reverse engineering.
+These questions require runtime evidence beyond static host analysis.
 
 ---
 
-# 44. Current Test Strategy
+# 58. Current Test Strategy
 
-The current strategy separates host and radio variables as much as practical.
+Earlier development used several configurations to isolate variables:
 
-Useful configurations include:
-
-```text
-Stock host
+```text id="9bghcg"
+stock host
 +
 WF200 3.16.1
 ```
 
-for the original reference,
-
-```text
+```text id="uvbn5v"
 C-C
 +
 WF200 3.16.1
 ```
 
-for host Beacon Recovery correction without changing radio firmware,
-
-```text
+```text id="pp5aqz"
 C-C
 +
 WF200 3.18.0
 ```
 
-for host Recovery correction with the newer radio firmware,
+and historically:
 
-and:
-
-```text
+```text id="a251b5"
 A1
 +
 C-C
@@ -1329,49 +1749,86 @@ C-C
 WF200 3.18.0
 ```
 
-for the current integrated corrected platform.
+Those stages were useful for mechanism isolation.
 
-This makes it possible to distinguish changes caused by host corrections from changes associated with the radio firmware update.
+The current active strategy is different:
+
+```text id="7myn5l"
+B2.1_OBS
++
+WF200 3.18.0
+```
+
+compared against:
+
+```text id="l6qkjx"
+stock 2.2.4
++
+WF200 3.16.1
+```
+
+The project is now waiting for long-term comparative hardware evidence rather than adding more radio-firmware variants.
 
 ---
 
-# 45. Current Conclusions
+# 59. Current Conclusions
 
-The WF200 is an important but separate part of the Shelly TRV Gen1 battery-drain investigation.
+WF200 is an important but separate part of the Shelly TRV Gen1 battery-drain investigation.
 
 The strongest current conclusions are:
 
-### The radio firmware changed substantially over the lifetime of the TRV
+### The radio firmware evolved significantly
 
-The investigated Shelly releases use WF200 firmware from 3.12.2 through 3.16.1.
+Investigated Shelly releases use WF200 firmware from 3.12.2 through 3.16.1.
 
-### Shelly's Beacon Recovery is not a direct WF200 error report
+### Shelly Beacon Recovery is not a direct WF200 error report
 
-It is a host-side decision based on host-processed beacon statistics.
+It is a host-side decision based on processed beacon statistics.
 
-### D3 does not explain the recurring Recovery loop
+### D3 does not explain the historical recurring Recovery pattern
 
-A physical D3 observer recorded thousands of Recovery events without a D3 event.
+A hardware D3 observer recorded thousands of Recoveries without a D3 event.
 
 ### WF200 3.18.0 is technically relevant
 
-Silicon Labs documents a fix for a device failing to sleep after a power-save mode change.
+Silicon Labs documents a fix for failure to sleep after a PM-mode change.
 
-### The newer radio firmware can operate with Shelly FMAC 3.7.0
+### WF200 3.18.0 works with Shelly FMAC 3.7.0 on tested hardware
 
-This has been demonstrated on physical TRV hardware.
+This has been demonstrated through normal TRV startup and WLAN operation.
 
-### Fresh Recovery remains
+### The radio firmware integration is structurally qualified
 
-WF200 3.18.0 does not eliminate every fresh host Recovery trigger under the tested conditions.
+The official 3.18.0 SEC was relocated, all 54 qualified references were updated, and the resulting payload was verified byte-for-byte.
 
-### Radio sleep remains partly opaque
+### Fresh host Recovery can still occur with 3.18.0
 
-Without direct physical power measurement or complete internal WF200 reverse engineering, host-visible state cannot be treated as proof of actual radio sleep residency.
+Historical C-C-based tests showed fresh qualifying Recovery events.
 
-### The corrected experimental platform therefore addresses both sides
+### Physical radio sleep remains partly opaque
 
-The current A1+C-C+WF200 3.18.0 platform combines demonstrated host corrections with the newer radio-side PM implementation without claiming that either side alone is the complete historical root cause.
+Host-visible commands and diagnostics are not equivalent to direct RF sleep-residency measurement.
+
+### The current corrected hardware platform already includes 3.18.0
+
+The active platform is B2.1_OBS, not the older A1+C-C build.
+
+### B2.2 retains the same radio firmware
+
+Its additional corrections are host-side and it remains offline-qualified only.
+
+The current research decision remains:
+
+```text id="7fb58o"
+WAIT
+OBSERVE
+COLLECT VOLTAGE/RUNTIME DATA
+DO NOT CHANGE TEST VARIABLES
+```
+
+The project therefore does not currently need another WF200 firmware experiment.
+
+The most valuable next evidence will come from whether B2.1_OBS remains stable long term or, if drain occurs, what the PM52→cmd66 observer captures around the first failure.
 
 ---
 
@@ -1385,7 +1842,7 @@ Host sleep and blocker accounting:
 
 [`host-sleep-and-blocker-accounting.md`](host-sleep-and-blocker-accounting.md)
 
-PM lifecycle and A1:
+PM lifecycle and A1/A1R:
 
 [`pm-lifecycle-and-a1.md`](pm-lifecycle-and-a1.md)
 
@@ -1413,6 +1870,10 @@ Experimental patches:
 
 [`../patch/README.md`](../patch/README.md)
 
+Experimental device matrix:
+
+[`../testing/experimental-device-matrix.md`](../testing/experimental-device-matrix.md)
+
 Battery testing:
 
 [`../testing/battery-testing.md`](../testing/battery-testing.md)
@@ -1433,11 +1894,16 @@ This analysis combines:
 - Beacon Recovery runtime statistics
 - controlled WF200 firmware replacement
 - physical OTA testing
+- PM52→cmd66 observation
 - long-term battery and WLAN observation
 
-The project distinguishes host-visible radio behavior from conclusions about internal WF200 implementation.
+Historical builds are kept under their original identities.
 
-Where internal radio behavior cannot be observed directly, the limitation is stated rather than inferred from host logs.
+A1 measurements are not relabeled as A1R.
+
+B2/B2_OBS measurements are not retroactively described as B2.1/B2.1_OBS.
+
+Where internal WF200 behavior cannot be observed directly, the limitation is stated rather than inferred from host telemetry.
 
 ---
 
@@ -1450,4 +1916,3 @@ It is not affiliated with, endorsed by, or supported by Shelly Group or Silicon 
 Shelly and Silicon Labs product names and trademarks are used only to identify the hardware and firmware being studied.
 
 Experimental firmware should only be used on devices where recovery or reflashing is possible.
-````

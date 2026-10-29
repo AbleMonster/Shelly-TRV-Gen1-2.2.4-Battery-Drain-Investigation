@@ -1,4 +1,3 @@
-````markdown
 # Host Sleep and Blocker Accounting
 
 ## Shelly TRV Gen1 Firmware 2.2.4
@@ -17,10 +16,12 @@ The analysis focuses on:
 - the shared B2 reference-counting model
 - task-preemption races in B2 accounting
 - concrete phantom-B2 and lost-B2 schedules
+- the qualified bounded B2 serialization correction
 - PA8 as an independent WLAN sleep gate
 - the relationship between host sleep and WLAN power management
 - cross-version relevance
-- the boundary between these findings and the A1 patch
+- the boundary between these findings and A1/A1R
+- the current B2.1/B2.1_OBS test architecture
 
 The main firmware target is:
 
@@ -32,13 +33,19 @@ Firmware 2.1.0 is also used for a narrower architectural comparison.
 
 This document does not attempt to estimate electrical current consumption.
 
-It describes when the firmware permits or prevents host low-power entry and identifies a correctness defect in the shared B2 blocker accounting.
+It describes when firmware permits or prevents host low-power entry and documents a demonstrated correctness defect in the shared B2 blocker accounting.
+
+The B2 defect has since been corrected experimentally through bounded serialization.
+
+That correction is qualified and incorporated into the current B2.1 and B2.1_OBS firmware.
+
+This does **not** establish that B2 corruption was the historical battery-drain root cause.
 
 ---
 
 # 1. Host MCU
 
-The Shelly TRV Gen1 uses an:
+The Shelly TRV Gen1 uses a:
 
 ```text
 Silicon Labs EFM32GG11
@@ -68,11 +75,11 @@ WF200
     +-- protected radio firmware
 ```
 
-A host-side sleep restriction does not directly prove that the WF200 is awake.
+A host-side sleep restriction does not prove that WF200 is awake.
 
-Likewise, a WF200 power-save state does not directly prove that the EFM32GG11 has entered EM2.
+Likewise, a WF200 power-save state does not prove that the EFM32GG11 entered EM2.
 
-The two layers interact, but they must be analyzed separately.
+The two power domains interact but must be analyzed separately.
 
 ---
 
@@ -121,7 +128,7 @@ B2
 B3
 ```
 
-These names describe their role in the reconstructed firmware logic.
+These names describe their reconstructed firmware roles.
 
 ---
 
@@ -160,17 +167,17 @@ B3 owner
     "EM3 is currently prohibited"
 ```
 
-This means B2 is the stronger restriction.
+B2 is therefore the stronger restriction.
 
 ---
 
 # 4. B2 and B3 Are Reference Counters
 
-B2 and B3 should not be interpreted as simple Boolean flags.
+B2 and B3 must not be interpreted as simple Boolean flags.
 
 They are aggregate reference counters.
 
-Multiple independent software components can legitimately require the same sleep restriction at the same time.
+Multiple independent software components may legitimately require the same restriction simultaneously.
 
 For B2:
 
@@ -190,7 +197,7 @@ B2 = 3
 
 The same general reference-counting principle applies to the blocker infrastructure.
 
-This design is necessary because independent operations can overlap.
+This design is required because independent operations can overlap.
 
 For example:
 
@@ -208,15 +215,15 @@ motor operation completes
 B2 = 0
 ```
 
-Replacing B2 with a Boolean would lose this ownership information.
+Replacing B2 with a Boolean would lose ownership information.
 
 ---
 
 # 5. Why Shared Ownership Is Correct
 
-The fact that several tasks modify B2 is not itself a bug.
+The fact that several tasks modify B2 is not itself a defect.
 
-A shared reference counter is an appropriate design when multiple independent subsystems can require the same restriction.
+A shared reference counter is an appropriate design when multiple independent subsystems may require the same sleep restriction.
 
 The required invariant is:
 
@@ -226,9 +233,9 @@ B2 == number of active B2 ownership contributions
 
 The problem identified in firmware 2.2.4 is not shared ownership.
 
-The problem is that the read-modify-write operations used to maintain the shared count are not consistently serialized.
+The problem is inconsistent serialization of the read-modify-write operations maintaining the shared count.
 
-This distinction is fundamental:
+The distinction is fundamental:
 
 > Multiple simultaneous B2 owners are required. Multiple unsynchronized modifications of B2 are not.
 
@@ -242,29 +249,29 @@ The relevant startup path was reconstructed approximately as:
 
 ```text
 reset
-    |
-    v
+   |
+   v
 platform initialization
-    |
-    v
+   |
+   v
 CRT / runtime initialization
-    |
-    v
+   |
+   v
 product main
-    |
-    v
+   |
+   v
 sleep-state initialization
-    |
-    v
+   |
+   v
 board initialization
-    |
-    v
+   |
+   v
 add B3 contribution
-    |
-    v
+   |
+   v
 WLAN initialization
-    |
-    v
+   |
+   v
 main task / scheduler
 ```
 
@@ -280,13 +287,13 @@ B3 >= 1
 
 during normal operation.
 
-Therefore the normal idle selector does not reach EM3.
+The normal idle selector therefore does not reach EM3.
 
 ---
 
 # 7. The Permanent B3 Contribution Is Intentional
 
-A permanent sleep restriction can initially look suspicious in a battery-powered device.
+A permanent sleep restriction can initially appear suspicious in a battery-powered product.
 
 In this case, however, the restriction has a concrete technical reason.
 
@@ -298,16 +305,14 @@ LFXO
 
 The RTC is used by the tickless scheduler for wake timing and elapsed-time reconstruction.
 
-The EM3 implementation disables the low-frequency oscillators required by the current configuration.
-
-The relevant EM3 path disables:
+The EM3 implementation disables:
 
 ```text
 LFXO
 LFRCO
 ```
 
-while EM2 retains the required clocking.
+while EM2 retains the required low-frequency clocking.
 
 Therefore:
 
@@ -315,7 +320,9 @@ Therefore:
 normal deepest idle = EM2
 ```
 
-is consistent with the current firmware design.
+is consistent with the current firmware architecture.
+
+The project does not classify the permanent B3 contribution as a battery-drain defect.
 
 ---
 
@@ -330,7 +337,7 @@ remove permanent B3
 allow EM3
 ```
 
-That is not a valid correction for the current firmware.
+That is not a valid correction for the current firmware architecture.
 
 The scheduler currently depends on an RTC/tickless timebase sourced from LFXO.
 
@@ -338,28 +345,22 @@ Entering EM3 with the current implementation would stop that clock.
 
 Re-enabling LFXO after wake does not recreate the RTC ticks that did not occur while the oscillator was stopped.
 
-The problem is therefore not simply:
-
-```text
-EM3 disabled
-```
-
-but:
+The actual constraint is therefore:
 
 ```text
 current scheduler/timebase architecture
 is not designed for normal EM3 residency
 ```
 
-Using EM3 safely would require a separate redesign of the low-frequency clock and scheduler assumptions.
+Using EM3 safely would require a separate clock/timebase redesign.
 
-That would be an optimization project, not a correction of the current battery-drain defects.
+That would be an optimization project, not a correction of the demonstrated battery-drain-related firmware defects.
 
 ---
 
 # 9. Intended Normal Host Sleep
 
-With the permanent B3 contribution present, the intended normal idle condition is:
+With the permanent B3 contribution present, intended normal idle is:
 
 ```text
 B2 = 0
@@ -372,15 +373,15 @@ which permits:
 EM2
 ```
 
-Therefore the important host-side battery question is not:
+The important host-side question is therefore not:
 
 > Why does the TRV not enter EM3?
 
 The relevant question is:
 
-> Does the host reliably reach EM2 whenever no legitimate B2 owner requires EM1?
+> Does the host reliably permit EM2 whenever no legitimate B2 owner requires EM1?
 
-This distinction changed the direction of the host-sleep investigation.
+This distinction drove the host-sleep investigation.
 
 ---
 
@@ -406,9 +407,9 @@ Different paths use different synchronization behavior.
 
 Some operations are protected by interrupt masking.
 
-Others use the generic blocker helper without protecting the complete read-modify-write operation from task preemption.
+Others use a generic blocker helper without protecting the complete read-modify-write operation from task preemption.
 
-This mixture is the basis of the B2 concurrency defect.
+This mixture creates the B2 concurrency defect.
 
 ---
 
@@ -432,11 +433,11 @@ B2 = value;
 
 for a release.
 
-The actual implementation also contains bounds/assertion behavior.
+The actual implementation additionally contains bounds/assertion behavior.
 
-The important concurrency property is that the generic read-modify-write sequence is not itself globally protected against task switching.
+The important concurrency property is that the complete generic read-modify-write sequence is not globally protected against task switching.
 
-A task can therefore be preempted after reading B2 but before storing the updated value.
+A task can therefore be preempted after reading B2 but before storing its updated value.
 
 ---
 
@@ -460,19 +461,17 @@ update B2
 restore original PRIMASK
 ```
 
-This means O-to-O operations using this path are serialized against each other.
+This serializes operations using that protected path against one another.
 
-The problem appears when an unprotected generic B2 operation overlaps with one of these protected operations.
+The problem occurs when an unprotected generic B2 operation overlaps with one of these protected operations.
 
-The protected operation is internally atomic.
-
-The other task can still have loaded a stale B2 value before the protected operation begins.
+The protected operation can itself be atomic while another task still holds a stale B2 value that it loaded before the protected operation began.
 
 ---
 
 # 13. Task Preemption Makes the Race Reachable
 
-The affected operations occur in real task contexts.
+The affected operations execute in real task contexts.
 
 Relevant examples in firmware 2.2.4 include:
 
@@ -492,21 +491,21 @@ WLAN manager / bus paths
     WLAN-related task contexts
 ```
 
-The motor and manual-DTIM B2 operations do not locally mask interrupts or suspend scheduling around the complete generic B2 update.
+The motor and manual-DTIM B2 operations do not locally mask interrupts or suspend scheduling across the complete generic B2 update.
 
-Equal-priority tasks can be switched by the scheduler following an RTC tick/PendSV sequence.
+Equal-priority tasks can switch following scheduler activity such as the RTC tick/PendSV path.
 
-The race is therefore not based on an impossible theoretical interleaving.
+The race is therefore not based only on an impossible theoretical interleaving.
 
-Native task contexts exist that can produce the required preemption.
+Concrete native task contexts exist that can produce the required schedule.
 
 ---
 
 # 14. B2 Concurrency Defect
 
-The shared B2 reference count is vulnerable to a classic lost-update problem.
+The shared B2 reference count is vulnerable to a classic lost-update race.
 
-Consider two operations:
+Consider:
 
 ```text
 Task A:
@@ -533,9 +532,11 @@ Task A resumes
 Task A writes result based on stale value
 ```
 
-Task B's contribution can be lost or an already removed contribution can effectively be recreated.
+Task B's contribution can be lost, or a contribution already removed by Task B can effectively be recreated.
 
-Both directions have been reconstructed in firmware 2.2.4.
+Both directions were reconstructed in firmware 2.2.4.
+
+This is a demonstrated firmware correctness defect.
 
 ---
 
@@ -576,7 +577,7 @@ Task A:
     B2 = 2
 ```
 
-The correct result at this point is:
+The correct result is:
 
 ```text
 B2 = 1
@@ -590,7 +591,7 @@ Instead:
 B2 = 2
 ```
 
-When Task A later releases its own legitimate ownership:
+When Task A later releases its legitimate ownership:
 
 ```text
 B2 2 -> 1
@@ -600,11 +601,7 @@ the final state is:
 
 ```text
 B2 = 1
-```
 
-with:
-
-```text
 0 legitimate owners
 ```
 
@@ -614,7 +611,7 @@ This is a phantom B2 contribution.
 
 # 16. Consequence of Phantom B2
 
-The host sleep selector does not know which subsystem owns the count.
+The host sleep selector does not know which subsystem owns each count.
 
 It sees only:
 
@@ -643,11 +640,11 @@ selector permits only EM1
 intended EM2 unavailable
 ```
 
-This can persist until some later operation happens to alter the corrupted aggregate or the system is reinitialized/reset.
+The corrupted state can persist until later activity happens to alter the aggregate or the state is reinitialized.
 
-The firmware defect is established.
+The code defect is established.
 
-What has not yet been established is how often this schedule occurs on physical TRV devices or how much energy a resulting EM1 period consumes in real operation.
+Its historical field incidence and quantitative energy impact have not been established.
 
 ---
 
@@ -668,7 +665,7 @@ Motor:
     load B2 = 0
 ```
 
-Before the motor stores the increment, another WLAN operation acquires ownership through the protected path:
+Before the motor stores the increment, a WLAN operation acquires ownership through the protected path:
 
 ```text
 WLAN:
@@ -698,13 +695,13 @@ Instead:
 B2 = 1
 ```
 
-When the WLAN operation later releases:
+When WLAN later releases:
 
 ```text
 B2 1 -> 0
 ```
 
-the motor still legitimately requires EM1.
+the motor may still legitimately require EM1.
 
 The selector can now permit:
 
@@ -712,15 +709,15 @@ The selector can now permit:
 EM2
 ```
 
-while the motor's B2 ownership has effectively been lost.
+while the motor's B2 contribution has effectively been lost.
 
 ---
 
 # 18. Consequence of Lost B2
 
-The B2 defect is therefore not only a battery-consumption issue.
+The B2 defect is therefore not only a potential battery-consumption problem.
 
-It is a general power-management correctness problem.
+It is a general power-management correctness defect.
 
 The two directions are:
 
@@ -756,7 +753,7 @@ A correct fix must prevent both.
 
 # 19. Why Clearing B2 Is Not a Fix
 
-Because B2 is a shared reference counter, a correction must not simply do:
+Because B2 is a shared reference counter, a correction must not simply perform:
 
 ```c
 B2 = 0;
@@ -775,7 +772,7 @@ WLAN owns B2
 B2 = 2
 ```
 
-If the WLAN operation finishes:
+If WLAN completes:
 
 ```text
 correct:
@@ -788,15 +785,15 @@ Forcing:
 B2 = 0
 ```
 
-would incorrectly discard the motor's ownership.
+would incorrectly discard the motor contribution.
 
-The same reasoning prevents A1 or another subsystem from treating the entire aggregate as though it belonged to one PM transaction.
+The aggregate must retain its reference-count semantics.
 
 ---
 
-# 20. Correct Fix Direction
+# 20. Qualified B2 Correction
 
-The smallest correction direction is to preserve the reference-counting design while making each complete check/read-modify-write operation atomic with respect to competing task contexts.
+The minimal correction direction is to preserve the reference-counting architecture while making the complete relevant check/read-modify-write sequence atomic with respect to competing task contexts.
 
 Conceptually:
 
@@ -810,28 +807,82 @@ update_counter();
 restore_PRIMASK(saved);
 ```
 
-The exact implementation must preserve:
+The implementation must preserve:
 
 - existing assertion semantics
 - caller ABI
-- nested interrupt-mask state
+- incoming/nested interrupt-mask state
 - ownership semantics
 - task behavior
-- timing constraints
+- bounded timing behavior
 
-The objective is not to redesign the blocker model.
+The objective is not to redesign the blocker architecture.
 
-It is to make the existing shared reference counter safe against the demonstrated preemption race.
+It is to make the existing shared reference counter safe against the demonstrated task-preemption race.
 
-No such global B2 correction is part of the current A1 patch.
+This correction has now been implemented and qualified as:
+
+```text
+B2 bounded serialization
+```
+
+It is part of:
+
+```text
+B2.1
+B2.1_OBS
+B2.2
+```
+
+The B2 correction remains analytically separate from A1/A1R.
 
 ---
 
-# 21. Relationship to A1
+# 21. B2 Correction Qualification
 
-A1 corrects a different set of host power-management problems.
+The B2 correction was qualified against the reconstructed ownership and preemption behavior rather than by merely verifying that the modified instructions decode.
 
-Its scope includes issues such as:
+Qualification included thousands of behavior cases together with mixed-owner and preemption schedules.
+
+The current integrated qualification records include:
+
+```text
+B2:
+2060 + 102
+
+mixed/preemption:
+qualified test sets
+```
+
+The important properties demonstrated by qualification are:
+
+```text
+multiple legitimate owners preserved
+
+phantom-count schedule prevented
+
+lost-count schedule prevented
+
+incoming PRIMASK preserved
+
+reference-counter semantics preserved
+
+no global clear introduced
+
+no Boolean replacement introduced
+```
+
+The correction is therefore considered independently qualified for integration.
+
+This is still different from demonstrating its historical battery-life contribution.
+
+---
+
+# 22. Relationship to A1 and A1R
+
+A1/A1R correct a different set of host power-management problems.
+
+Their scope includes:
 
 - Final-Sleep failure cleanup
 - Wake failure handling
@@ -842,39 +893,42 @@ Its scope includes issues such as:
 - independent inhibit ownership
 - association/handoff correctness
 
-These defects involve PM operation lifecycle and ownership.
+These defects concern PM operation lifecycle and ownership.
 
-The global B2 race occurs in the common blocker accounting used by multiple subsystems.
+The B2 race concerns the shared aggregate blocker counter.
 
 Conceptually:
 
 ```text
-A1
+A1 / A1R
     |
     +-- PM lifecycle
     +-- operation ownership
     +-- settlement
     +-- failure handling
 
-
-B2 race
+B2 correction
     |
     +-- shared reference counter
-    +-- generic read-modify-write
+    +-- read-modify-write serialization
     +-- task preemption
 ```
 
-The B2 race is therefore outside A1's current scope.
+The original A1 implementation did **not** correct the global B2 race.
 
-It is not an A1 regression.
+The later A1R revision also remains conceptually separate from the B2 correction.
+
+A1R corrects an experimental A1 temporary-override regression while retaining A1's lifecycle corrections.
+
+B2 bounded serialization is independently integrated alongside A1R in B2.1.
 
 ---
 
-# 22. Final-Sleep and B2
+# 23. Final-Sleep and B2
 
-A previously identified Final-Sleep failure path can retain a B2 contribution when cleanup/release is not completed correctly.
+A previously identified Final-Sleep failure path can retain a B2-related ownership contribution when cleanup/release does not complete correctly.
 
-This can also result in:
+This can result in:
 
 ```text
 B2 != 0
@@ -884,30 +938,31 @@ without the expected normal lifecycle completing.
 
 That defect and the global B2 concurrency race must not be conflated.
 
-They are two different ways to reach an incorrect blocker state:
+They are different ways to reach an incorrect blocker state:
 
 ```text
 Final-Sleep defect
     |
     +-- lifecycle / release failure
 
-
 B2 concurrency defect
     |
     +-- aggregate reference-count corruption
 ```
 
-A1 addresses the qualified Final-Sleep lifecycle problem.
+A1/A1R address the qualified lifecycle problem.
 
-It does not globally serialize unrelated B2 modifications.
+B2 bounded serialization addresses the shared-counter concurrency problem.
+
+Both corrections are present in the B2.1 family.
 
 ---
 
-# 23. Initialization and B2
+# 24. Initialization and B2
 
-A separate initialization path also contains ownership timing relevant to B2.
+Initialization also contains ownership timing relevant to B2.
 
-The important distinction is again between:
+The important distinction remains between:
 
 ```text
 operation-specific ownership lifecycle
@@ -919,9 +974,9 @@ and:
 global aggregate counter correctness
 ```
 
-A1 corrects the qualified PM handoff/lifecycle behavior.
+A1/A1R correct qualified PM handoff and lifecycle behavior.
 
-The later B2 audit showed that even if every individual owner follows the intended acquire/release lifecycle, the shared aggregate can still become corrupted if concurrent updates are not serialized.
+The B2 audit demonstrated that even if every individual owner follows a balanced acquire/release lifecycle, the shared aggregate can still be corrupted if concurrent updates are not serialized.
 
 Therefore:
 
@@ -937,9 +992,11 @@ B2 aggregate remains correct
 
 when lost updates are possible.
 
+The current integrated correction addresses both classes separately.
+
 ---
 
-# 24. PA8 Is a Separate Sleep Gate
+# 25. PA8 Is a Separate Sleep Gate
 
 B2/B3 selection is not the final condition before host sleep.
 
@@ -949,15 +1006,15 @@ PA8 was traced to the WLAN host-notification path.
 
 Board initialization configures PA8 as an input with pull-down behavior.
 
-A rising condition maps into the GPIO interrupt path and ultimately to WLAN/bus-worker processing.
+A rising condition maps into the GPIO interrupt path and ultimately into WLAN/bus-worker processing.
 
-The exact schematic net name and external electrical implementation have not been recovered from the firmware alone.
+The exact schematic net name and external electrical implementation were not recovered from firmware alone.
 
-Functionally, however, PA8 participates in communication from the WLAN side to the host.
+Functionally, PA8 participates in communication from the WLAN side to the host.
 
 ---
 
-# 25. PA8 Sleep Veto
+# 26. PA8 Sleep Veto
 
 Before executing the low-power instruction, the sleep callback checks PA8.
 
@@ -973,7 +1030,7 @@ If PA8 is HIGH:
 WFI is not executed
 ```
 
-This can be represented as:
+Conceptually:
 
 ```text
 select EM1/EM2
@@ -989,16 +1046,16 @@ check PA8
         +-- HIGH
               |
               v
-          return without WFI
+         return without WFI
 ```
 
 PA8 therefore provides a sleep veto independent of B2/B3.
 
 ---
 
-# 26. Why PA8 Is Not a Reference Counter
+# 27. Why PA8 Is Not a Reference Counter
 
-PA8 and B2 represent different types of state.
+PA8 and B2 represent different forms of state.
 
 B2 answers:
 
@@ -1008,7 +1065,7 @@ PA8 answers approximately:
 
 > Is the WLAN notification line currently asserted?
 
-B2 therefore needs shared ownership accounting.
+B2 therefore requires shared ownership accounting.
 
 PA8 is a physical signal level.
 
@@ -1022,39 +1079,25 @@ PA8:
 "Is the doorbell currently ringing?"
 ```
 
-Treating PA8 as another reference-counted software owner would not match its observed role.
+Treating PA8 as another reference-counted software owner would not match its reconstructed role.
 
 ---
 
-# 27. PA8 HIGH Is Not Automatically a Bug
+# 28. PA8 HIGH Is Not Automatically a Bug
 
-A WLAN device asserting a host-notification signal while work is pending is normal behavior.
+A WLAN device asserting a host-notification line while work is pending can be legitimate.
 
-Preventing WFI while that notification remains asserted can therefore be intentional.
+Preventing WFI while that notification remains asserted is therefore reasonable.
 
-The important runtime questions are instead:
+A persistent or repeated HIGH state would demonstrate that host low-power entry is being vetoed.
 
-```text
-How often is PA8 HIGH at sleep admission?
+It would not by itself establish why the WLAN side is asserting the signal.
 
-How long does it remain HIGH?
-
-Does it repeatedly veto WFI?
-
-Does this correlate with a battery-drain episode?
-
-Does it correlate with WLAN Recovery or another radio state?
-```
-
-Static analysis alone cannot answer these questions.
-
-A persistent PA8 HIGH condition would demonstrate that WFI is being prevented.
-
-It would not, by itself, identify why the WLAN side keeps the signal asserted.
+No current correction bypasses PA8 simply to increase sleep time.
 
 ---
 
-# 28. Sleep Selection and PA8 Are Separate
+# 29. Sleep Selection and PA8 Are Separate
 
 A device can have:
 
@@ -1069,7 +1112,7 @@ so that the selector chooses:
 EM2
 ```
 
-but still fail to execute WFI because:
+but still not execute WFI because:
 
 ```text
 PA8 = HIGH
@@ -1087,31 +1130,17 @@ is not equivalent to:
 EM2 physically entered
 ```
 
-This distinction is important for runtime telemetry.
-
-A useful observer must distinguish at least:
-
-```text
-mode selected
-```
-
-from:
-
-```text
-WFI reached
-```
-
-where instrumentation can do so without changing the behavior being measured.
+This distinction is important for telemetry and battery interpretation.
 
 ---
 
-# 29. Sleep Entry Atomicity
+# 30. Sleep Entry Atomicity
 
 The final scheduler admission, blocker selection and low-power entry sequence uses interrupt masking around the critical selection/entry region.
 
-No separate race was demonstrated in which B2 is changed after a correct selector read but before WFI in a way that invalidates the selected mode.
+No separate race was demonstrated in which B2 changes after a correct selector read but before WFI in a manner that invalidates the selected mode.
 
-The important B2 defect occurs earlier:
+The demonstrated B2 defect occurs earlier:
 
 ```text
 B2 aggregate already corrupted
@@ -1123,25 +1152,23 @@ selector reads corrupted but stable value
 selector makes internally consistent decision
 ```
 
-The selector itself can therefore operate correctly while still choosing the wrong effective restriction because the reference counter was previously corrupted.
+The selector can therefore operate correctly while making the wrong effective decision because its input aggregate was previously corrupted.
 
 ---
 
-# 30. Deep-Sleep Preparation and Restoration
+# 31. Deep-Sleep Preparation and Restoration
 
 The EM2/EM3 paths contain state-save and restoration logic around low-power entry.
 
-A potential concern was whether the PA8 veto could occur after hardware state had already been modified for deep sleep and therefore leave the system partially prepared.
+A potential concern was whether PA8 veto could occur after hardware state had already been destructively modified for deep sleep.
 
-Further analysis showed that the relevant early save operation snapshots/waits but does not perform the destructive hardware transition that would require restoration before the PA8 check returns.
+Further analysis showed that the relevant early save operation snapshots/waits but does not perform the destructive hardware transition that would require restoration before a PA8-veto return.
 
 No separate PA8-veto preparation/restoration defect was established.
 
-The returning EM2/EM3 paths contain the expected restoration behavior.
-
 ---
 
-# 31. `SLEEPDEEP`
+# 32. `SLEEPDEEP`
 
 EM2 and EM3 use the Cortex-M:
 
@@ -1161,7 +1188,7 @@ No independent defect was established from this handling.
 
 ---
 
-# 32. `/stats sleep_ratio`
+# 33. `/stats sleep_ratio`
 
 Firmware 2.2.4 exposes:
 
@@ -1171,7 +1198,7 @@ sleep_ratio
 
 through `/stats`.
 
-Reverse engineering of the corresponding calculation shows that this value is based on tickless timing/compensation behavior.
+Reverse engineering shows that this value is based on tickless timing/compensation behavior.
 
 It is not a direct measurement of:
 
@@ -1191,20 +1218,19 @@ and it does not directly measure:
 WF200 sleep residency
 ```
 
-Therefore a low or high `sleep_ratio` value must not be interpreted as a direct percentage of physical sleep time.
-
-This limitation is important when comparing battery behavior between firmware variants.
+A low or high `sleep_ratio` must therefore not be interpreted as a percentage of physical sleep time.
 
 ---
 
-# 33. Host Sleep vs. WF200 Power Save
+# 34. Host Sleep vs. WF200 Power Save
 
-The host and radio can independently have power-state problems.
+Host and radio can independently have power-state problems.
 
 Examples:
 
 ```text
 Host problem:
+
     phantom B2
         |
         v
@@ -1215,6 +1241,7 @@ versus:
 
 ```text
 Radio problem:
+
     WF200 fails to sleep correctly
         |
         v
@@ -1225,6 +1252,7 @@ and:
 
 ```text
 Interface condition:
+
     PA8 remains asserted
         |
         v
@@ -1259,15 +1287,11 @@ WF200 entered its intended power-save state
 
 ---
 
-# 34. Relationship to Beacon Recovery
+# 35. Relationship to Beacon Recovery
 
-Beacon Recovery changes WLAN power-management behavior and therefore can affect the conditions under which host-side sleep ownership is acquired and released.
+Beacon Recovery changes WLAN power-management behavior and can therefore influence how often host-side ownership transitions occur.
 
-However, Beacon Recovery and the B2 concurrency defect are different mechanisms.
-
-Beacon Recovery is driven by the 2.2.4 beacon-statistics/control path.
-
-The B2 problem exists in the shared host sleep-blocker infrastructure.
+Beacon Recovery and the B2 concurrency defect are nevertheless separate mechanisms.
 
 A useful separation is:
 
@@ -1276,12 +1300,10 @@ Beacon Recovery
     |
     +-- Why is WLAN PM being changed?
 
-
 B2 accounting
     |
     +-- Does host software correctly account
         for all active EM1 restrictions?
-
 
 PA8
     |
@@ -1289,11 +1311,11 @@ PA8
         preventing WFI?
 ```
 
-The project does not currently claim that every B2 corruption event must originate from Beacon Recovery.
+The project does not claim that every historical B2 corruption event, if one occurred, must have originated from Beacon Recovery.
 
 ---
 
-# 35. Cross-Version Relevance
+# 36. Cross-Version Relevance
 
 A narrower comparison with firmware 2.1.0 found the same broad host-sleep architecture.
 
@@ -1304,184 +1326,239 @@ Firmware 2.1.0 also contains:
 - equivalent sleep selection
 - the PA8 sleep callback
 - EM2/EM3 dispatch
-- generic unprotected aggregate blocker helpers
+- generic aggregate blocker helpers with the same broad synchronization concern
 
-This means the architecture relevant to the B2 problem predates firmware 2.2.4.
+The architecture relevant to the B2 problem therefore predates firmware 2.2.4.
 
-That is important because historical battery drain also predates 2.2.4.
+This matters because historical battery drain also predates 2.2.4.
 
-However, the complete task-level concurrency witness established for 2.2.4 has not been closed to the same depth for 2.1.0.
+However, the complete task-level concurrency witness demonstrated for 2.2.4 was not closed to the same depth for 2.1.0.
 
-The supported conclusion is therefore:
+The supported conclusion remains:
 
-> The vulnerable blocker architecture exists in both analyzed generations, while the complete concrete task-preemption schedules have been demonstrated for firmware 2.2.4.
+> The vulnerable blocker architecture exists in both analyzed generations, while complete concrete task-preemption schedules were demonstrated for firmware 2.2.4.
 
-It would be too strong to claim identical runtime incidence in 2.1.0 without the corresponding task-level analysis.
+Identical runtime incidence across versions must not be assumed.
 
 ---
 
-# 36. Why the Cross-Version Result Matters
+# 37. Why the Cross-Version Result Matters
 
-The B2 finding is different from Beacon Recovery.
+The B2 finding differs from Beacon Recovery.
 
-Beacon Recovery in its analyzed form is a later 2.2.4 mechanism.
+The analyzed Beacon Recovery implementation is a later 2.2.4 mechanism.
 
 The shared host blocker architecture is older.
 
-Therefore the B2 defect class is at least structurally compatible with the fact that battery-drain behavior was also observed on older firmware.
+The B2 defect class is therefore structurally compatible with battery-drain reports predating 2.2.4.
 
-This makes it a more interesting candidate for a common host-side mechanism.
+That makes it a plausible common host-side contributor.
 
-It still does not prove historical battery-drain causality.
-
-To establish that, physical runtime evidence is required.
+It does not establish historical causality.
 
 ---
 
-# 37. Runtime Questions
+# 38. Historical Stock-Observer Plan
 
-The most important remaining host-sleep questions are:
+Before the B2 correction was implemented, the investigation considered a clean-stock observer intended to measure:
 
-1. Does B2 become non-zero without a legitimate owner on physical hardware?
+```text
+B2
+B3
+O
+PA8
+EM1 / EM2 entry
+WFI attempts
+PA8 vetoes
+shadow B2 ownership
+```
 
-2. Does B2 become smaller than the number of legitimate owners?
+without serializing the native B2 race.
 
-3. If phantom B2 occurs, how long does it persist?
+That was the correct experimental plan at the time because the physical occurrence of the statically demonstrated race had not yet been separated from the effect of a correction.
 
-4. How often does the host actually attempt EM1?
+The observer had strict noninterference requirements:
 
-5. How often does the host actually attempt EM2?
+- no new synchronization across the native B2 race
+- no scheduler suspension around the race
+- no changed task priorities
+- no changed IRQ priorities
+- no changed B2/B3 policy
+- no PA8 bypass
+- no WF200 replacement
+- no Beacon Recovery correction
 
-6. How often does PA8 veto WFI?
+This clean-stock Host Observer is now **historical design work**.
 
-7. Can PA8 remain HIGH for extended periods?
-
-8. Do these conditions correlate with rapid battery-voltage decline?
-
-9. Do they correlate with Beacon Recovery?
-
-10. Do they occur on stock firmware without any experimental corrective patch?
-
-These questions motivate the Stock Host Observer work.
+It is no longer the current diagnostic platform.
 
 ---
 
-# 38. Observer Requirements
+# 39. Why the Observer Architecture Changed
 
-A diagnostic observer for this problem must preserve the defect it is intended to measure.
+The project subsequently progressed beyond the original stock-observer phase.
 
-It must not:
+The B2 correction was independently reconstructed and qualified through executable preemption and ownership testing.
 
-- make generic B2 operations atomic
-- extend PRIMASK across the native B2 race window
-- suspend scheduling around the native race window
-- replace the stock B2 helper
-- change task priorities
-- change IRQ priorities
-- change B2/B3 selection
-- change PA8 behavior
-- change the WF200 firmware
-- change Beacon Recovery
+At the same time, further PM work produced:
 
-Otherwise the measurement could eliminate the condition being investigated.
+```text
+A1
+    |
+    +-- experimental regression discovered
+    |
+    v
+A1R
+```
 
-A passive observer can still have timing overhead and therefore affect race probability.
+The current need therefore changed.
 
-That limitation must be documented.
+Instead of asking only:
+
+> Can the stock B2 race occur?
+
+the long-term experiment now asks:
+
+> Does the integrated corrected platform still develop a real battery-drain episode, and if so, what native PM52/cmd66 state appears first?
+
+That is why the current observer is no longer the original Stock Host Observer.
 
 ---
 
-# 39. Useful Observer Telemetry
+# 40. PM52 → cmd66 Observer
 
-Useful low-perturbation telemetry includes:
+The current observer records the already-existing WLAN PM and beacon-statistics lifecycle.
 
-```text
-current:
-    B2
-    B3
-    O
-    PA8
+Telemetry includes:
 
-sleep:
-    EM1 entries
-    EM2 entries
-    WFI attempts
-    PA8 vetoes
+- actual PM52 payloads
+- native PM52 results
+- A1R completion decisions
+- existing periodic command-0x66 requests/results
+- fresh estimator operands
+- connection epochs
+- a compact recent-event ring
+- first-fault freeze state
 
-B2 ownership:
-    acquire attempts
-    release attempts
-    owner class
+The observer deliberately generates no additional WF200 request.
 
-shadow accounting:
-    expected B2
-    actual B2
-    mismatch state
-
-diagnostics:
-    first qualified mismatch
-    recent B2 events
-```
-
-A shadow owner model is particularly useful because it can distinguish:
+It adds no:
 
 ```text
-known owners = 0
-actual B2    = 1
-
--> possible phantom contribution
+new timer
+new task
+new queue
+automatic network traffic
+flash write
+policy change
 ```
 
-from:
+Readout occurs only on explicit `/status` access.
 
-```text
-known owners = 1
-actual B2    = 0
-
--> possible lost contribution
-```
-
-Such a comparison is only valid when the observer has sufficient coverage of the relevant owner classes.
+The observer is therefore diagnostically different from the earlier proposed stock B2/PA8 observer.
 
 ---
 
-# 40. Entry Counts Are Not Residency
+# 41. B2.1 Integrated Host-Sleep Correction
 
-Even a correctly implemented observer must distinguish:
-
-```text
-EM2 entry count
-```
-
-from:
+The corrected observer-free baseline is:
 
 ```text
-time physically spent in EM2
+B2.1
 ```
 
-A count tells us how often an entry path was reached.
-
-It does not by itself tell us how long the MCU remained there.
-
-Likewise:
+It contains:
 
 ```text
-PA8 veto count
+A1R
++
+C-C
++
+B2 bounded serialization
++
+minimal MQTT PUBLISH guard
++
+WF200 3.18.0
 ```
 
-does not directly provide total PA8-HIGH duration.
+For host-sleep purposes, the relevant pieces are:
 
-Any future residency measurement requires a timebase that remains valid across the relevant low-power states and does not materially perturb them.
+```text
+A1R
+    PM lifecycle / ownership / settlement
 
-The stock tickless RTC cannot simply be assumed to provide a continuous independent physical-residency clock.
+B2 bounded serialization
+    shared blocker-counter correctness
+
+WF200 3.18.0
+    newer radio-side PM implementation
+```
+
+These are separate correction layers.
+
+B2.1 does not enable EM3 and does not bypass PA8.
 
 ---
 
-# 41. Battery-Drain Interpretation
+# 42. B2.1_OBS
 
-The B2 race is a demonstrated firmware correctness defect.
+The current hardware diagnostic build is:
 
-One direction can create:
+```text
+B2.1_OBS
+```
+
+defined as:
+
+```text
+B2.1
++
+PM52 -> cmd66 observer
+```
+
+B2.1_OBS therefore already contains the qualified B2 serialization correction.
+
+It is **not** intended to observe an uncorrected B2 lost-update race.
+
+Its purpose is to observe the corrected integrated system and capture the first relevant PM/radio anomaly if battery drain still occurs.
+
+The observer itself was qualified for software noninterference, while the normal caveat remains that any inserted instrumentation can in principle perturb physical timing slightly.
+
+---
+
+# 43. Current Hardware Experiment
+
+The current controlled population is:
+
+```text
+6 × B2.1_OBS
+1 × stock 2.2.4 control
+```
+
+The current research decision is:
+
+```text
+WAIT
+OBSERVE
+COLLECT VOLTAGE/RUNTIME DATA
+DO NOT CHANGE TEST VARIABLES
+```
+
+No new host-sleep correction is currently being designed.
+
+No EM3 experiment is currently justified.
+
+No B2 architecture change is currently required.
+
+The purpose of the test is to determine whether the corrected platform develops real long-term battery drain.
+
+---
+
+# 44. Current Interpretation of B2 Battery Relevance
+
+The B2 race is a demonstrated firmware defect.
+
+One direction can produce:
 
 ```text
 unnecessary EM1 restriction
@@ -1489,121 +1566,121 @@ unnecessary EM1 restriction
 
 which is directly relevant to battery consumption in principle.
 
-However, the project currently has no direct electrical measurement of:
+The opposite direction can permit EM2 too early, making the defect a correctness problem in both directions.
+
+However, the project still has no direct laboratory measurement that establishes:
 
 ```text
-EM1 current
-EM2 current
-time spent in each state
+historical number of B2 corruption events
+×
+time spent in resulting state
+×
+system current delta
 ```
 
-for the complete TRV system under the observed failure condition.
+for affected field devices.
 
-Therefore the strongest supported statement is:
+Therefore the strongest supported conclusion is:
 
-> Firmware 2.2.4 contains a task-preemption race that can corrupt the shared B2 sleep-blocker reference count. One demonstrated outcome can incorrectly prevent the EFM32GG11 from entering its intended EM2 idle state. Physical occurrence rate and battery impact remain to be measured.
+> Firmware 2.2.4 contains a demonstrated task-preemption race that can corrupt the shared B2 sleep-blocker reference count. One valid outcome can prevent the EFM32GG11 from reaching its intended EM2 idle state. The defect has been corrected experimentally through qualified bounded serialization, but its quantitative contribution to historical battery drain has not been established.
 
-This is a stronger result than a hypothetical code smell, but weaker than a demonstrated battery-drain root cause.
+That is stronger than identifying a code smell.
+
+It remains weaker than proving the historical battery-drain root cause.
 
 ---
 
-# 42. Current Correction Strategy
+# 45. What Should Not Be Changed
 
-The current host-side strategy is:
-
-```text
-first:
-    observe stock behavior
-
-then:
-    determine whether B2 corruption occurs
-    on physical hardware
-
-if confirmed:
-    serialize the complete B2 reference-counter
-    read-modify-write operations
-
-then:
-    compare stock observer
-    vs.
-    corrected observer
-
-finally:
-    integrate the qualified B2 correction
-    with the other host/radio corrections
-```
-
-The intended integrated correction path would then contain separate fixes for:
-
-```text
-C-C
-    Beacon Recovery validity
-
-A1
-    PM lifecycle / ownership
-
-future B2 correction
-    shared blocker-counter concurrency
-
-WF200 3.18.0
-    newer radio-side PM implementation
-```
-
-Each component addresses a different defect class.
-
----
-
-# 43. What Should Not Be Changed
-
-The current evidence does not support changing the following simply to reduce battery consumption:
+Current evidence does not support changing the following simply to reduce battery consumption.
 
 ### Permanent B3
 
-Do not remove it without redesigning the RTC/tickless clock source.
+Do not remove it without redesigning the RTC/tickless clock architecture.
 
 ### EM3 policy
 
-Do not enable normal EM3 entry with the current LFXO-dependent scheduler configuration.
+Do not enable normal EM3 entry with the current LFXO-dependent scheduler assumptions.
 
 ### PA8 veto
 
-Do not bypass it merely because it can prevent WFI. It represents WLAN-side notification state.
+Do not bypass it merely because it can prevent WFI.
+
+It represents WLAN-side notification state.
 
 ### B2 reference counting
 
-Do not replace it with a Boolean.
+Do not replace the shared reference counter with a Boolean.
 
 ### B2 aggregate
 
-Do not clear it globally when one owner completes.
+Do not clear B2 globally when one owner completes.
 
-The appropriate goal is:
+The appropriate principle is:
 
 > Preserve the intended power-management architecture while correcting demonstrated ownership and concurrency defects.
 
 ---
 
-# 44. Current Conclusions
+# 46. Current Correction Boundaries
 
-The EFM32GG11 host-sleep architecture is now sufficiently understood to separate several previously conflated mechanisms.
+The current corrected architecture separates the relevant layers approximately as:
+
+```text
+C-C
+    |
+    +-- Beacon Recovery estimator/control validity
+
+A1R
+    |
+    +-- PM lifecycle
+    +-- operation ownership
+    +-- settlement
+    +-- asynchronous completion validity
+    +-- correction of A1 temporary-override regression
+
+B2 bounded serialization
+    |
+    +-- shared blocker RMW correctness
+
+WF200 3.18.0
+    |
+    +-- newer radio-side PM implementation
+
+PA8
+    |
+    +-- preserved WLAN notification gate
+
+B3
+    |
+    +-- preserved EM3 restriction
+```
+
+Keeping these boundaries explicit remains important for failure attribution and regression testing.
+
+---
+
+# 47. Current Conclusions
+
+The EFM32GG11 host-sleep architecture is now sufficiently understood to separate several mechanisms that were initially easy to conflate.
 
 ### EM2 is the intended normal deep idle state
 
-The permanent B3 contribution prevents EM3 because the stock RTC/tickless implementation depends on LFXO.
+The permanent B3 contribution prevents normal EM3 selection because the stock RTC/tickless architecture depends on LFXO.
 
-This is intentional and technically justified.
+This is intentional.
 
 ### B2 is a shared reference counter
 
-Multiple simultaneous B2 owners are valid and required.
+Multiple simultaneous B2 owners are legitimate and required.
 
-The counter must therefore preserve aggregate ownership.
+The counter must preserve aggregate ownership.
 
-### B2 accounting contains a real concurrency defect
+### B2 accounting contains a demonstrated concurrency defect
 
-Not all read-modify-write operations are serialized.
+Not all stock read-modify-write operations are serialized.
 
-Concrete 2.2.4 task schedules can produce both:
+Concrete 2.2.4 schedules can produce both:
 
 ```text
 phantom B2
@@ -1617,39 +1694,85 @@ lost B2
 
 ### Phantom B2 can incorrectly prevent EM2
 
-A corrupted residual contribution can leave the host restricted to EM1 with no legitimate owner.
+A corrupted residual contribution can restrict the host to EM1 with no legitimate owner.
 
 ### Lost B2 can permit EM2 too early
 
-A lost contribution can allow EM2 while another subsystem still requires EM1.
+A lost contribution can allow deeper sleep while another owner still requires EM1.
+
+### B2 bounded serialization is now qualified
+
+The correction preserves reference-counter semantics while preventing the demonstrated task-preemption lost-update schedules.
+
+It is part of B2.1, B2.1_OBS and B2.2.
 
 ### PA8 is an independent WLAN sleep gate
 
-PA8 HIGH can veto WFI even when the blocker selector would otherwise permit sleep.
+PA8 HIGH can veto WFI even when B2/B3 selection otherwise permits sleep.
 
 This is not automatically a defect.
 
-### A1 does not solve the global B2 race
+### A1/A1R and B2 solve different problems
 
-A1 addresses PM lifecycle, ownership and settlement defects.
+A1/A1R address PM transition lifecycle, ownership and settlement.
 
-The shared blocker-counter concurrency problem is a separate issue.
+B2 serialization addresses shared aggregate-counter concurrency.
 
-### Physical runtime evidence is still required
+### A1 is historical; A1R is current
 
-The code defect is established.
+The original experimental A1 introduced a separate temporary-override regression.
 
-Its occurrence frequency, persistence and quantitative contribution to battery drain are not yet established.
+A1R retains the lifecycle corrections while correcting that research regression.
 
-The next useful step is passive observation of stock firmware without correcting the race being measured.
+### The original Stock Host Observer is no longer current
+
+The current diagnostic firmware is B2.1_OBS with the PM52→cmd66 observer.
+
+### Physical battery impact remains unresolved
+
+The B2 defect and other corrected defects are real.
+
+Their combined quantitative contribution to historical battery drain has not yet been demonstrated.
+
+### The current activity is observation
+
+The project is currently waiting for long-term B2.1_OBS evidence.
+
+If a genuine drain event occurs, the first-fault telemetry becomes the basis for renewed reverse engineering.
+
+If the corrected platform remains stable long term, the next logical step is observer removal followed by observer-free hardware regression testing.
+
+The governing distinctions remain:
+
+```text
+firmware defect demonstrated
+!=
+battery-drain root cause proven
+```
+
+and:
+
+```text
+offline qualification
+!=
+long-term hardware qualification
+```
 
 ---
 
 # Related Documents
 
+PM lifecycle and A1/A1R:
+
+[`pm-lifecycle-and-a1.md`](pm-lifecycle-and-a1.md)
+
 Host/WLAN power management:
 
 [`power-management-and-sleep.md`](power-management-and-sleep.md)
+
+Experimental patch details:
+
+[`../patch/README.md`](../patch/README.md)
 
 Firmware chronology:
 
@@ -1667,6 +1790,10 @@ Beacon Recovery:
 
 [`recovery-mechanism.md`](recovery-mechanism.md)
 
+WF200 firmware:
+
+[`wf200-firmware.md`](wf200-firmware.md)
+
 AP selection and roaming:
 
 [`ap-selection-and-roaming.md`](ap-selection-and-roaming.md)
@@ -1675,4 +1802,47 @@ Periodic mDNS:
 
 [`mdns-periodic-restart.md`](mdns-periodic-restart.md)
 
-Experimental
+Experimental device matrix:
+
+[`../testing/experimental-device-matrix.md`](../testing/experimental-device-matrix.md)
+
+Battery testing:
+
+[`../testing/battery-testing.md`](../testing/battery-testing.md)
+
+---
+
+# Research Method
+
+This analysis combines:
+
+- native ARM Thumb reverse engineering
+- task/context reconstruction
+- scheduler/preemption analysis
+- reference-counter ownership analysis
+- concrete interleaving reconstruction
+- executable race qualification
+- host-sleep control-flow analysis
+- cross-version comparison
+- deterministic patch construction
+- composition qualification
+- controlled hardware testing
+- long-term runtime observation
+
+Decompiler output is supporting evidence.
+
+Important conclusions are checked against native instructions, reachable control flow and executable behavior where practical.
+
+No direct electrical current measurement is currently used to assign quantitative battery impact to the B2 defect.
+
+---
+
+# Disclaimer
+
+This is an independent research project.
+
+It is not affiliated with, endorsed by, or supported by Shelly Group or Silicon Labs.
+
+The analysis applies to the firmware versions and hardware investigated here.
+
+Experimental firmware should only be used on devices where recovery or reflashing is possible.

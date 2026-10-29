@@ -14,17 +14,22 @@ Older firmware from `2.1.0` through `2.1.8` is used for comparison.
 
 The project does **not** assume that the historical battery-drain problem has a single cause.
 
-Instead, firmware comparison, native ARM analysis, runtime logging, packet capture, controlled firmware modifications and long-term battery tests are used to separate individual mechanisms and determine which ones actually matter.
+Instead, firmware comparison, native ARM analysis, runtime logging, packet capture, controlled firmware modifications, executable qualification and long-term battery tests are used to separate individual mechanisms and determine which ones actually matter.
 
-The investigation has now identified several concrete firmware defects, including:
+The investigation has identified several concrete firmware defects, including:
 
 - invalid Beacon Recovery control semantics in 2.2.4
 - reuse of stale Beacon Recovery evidence
 - invalid beacon-measurement windows
 - WLAN power-management lifecycle and settlement defects
 - a shared host sleep-blocker reference-counter race
+- a regression in the original experimental A1 correction affecting temporary PM overrides
+- a calibration restore path capable of immediately re-queuing calibration
+- incomplete battery-ADC resource cleanup on timeout
+- incomplete I2C display retirement on timeout
+- an incorrect WLAN GPIO interrupt-disable mask
 
-Several of these defects have experimental corrections.
+Several of these defects now have independently qualified experimental corrections.
 
 The historical battery-drain problem is **not yet considered completely solved**.
 
@@ -32,9 +37,9 @@ The historical battery-drain problem is **not yet considered completely solved**
 
 # Current Status
 
-The project has progressed beyond the original Beacon Recovery and mDNS isolation experiments.
+The project has progressed substantially beyond the original Beacon Recovery and mDNS isolation experiments.
 
-The current picture is:
+The current evidence supports a multi-layer model rather than a single confirmed root cause.
 
 ```text
 Historical drain
@@ -51,23 +56,27 @@ Historical drain
     |     |
     |     +-- C1a signed-value problem
     |     +-- C1b measurement-window problem
-    |     +-- C2 stale-evidence loop
+    |     +-- C2 stale-evidence recurrence
     |     |
     |     +-- corrected experimentally by C-C
     |
     +-- PM lifecycle / ownership defects
     |     |
-    |     +-- corrected experimentally by A1
+    |     +-- originally corrected by A1
+    |     +-- A1 temporary-override regression discovered
+    |     +-- corrected by A1R
     |
     +-- shared B2 blocker-counter race
     |     |
     |     +-- demonstrated statically
-    |     +-- physical occurrence under investigation
+    |     +-- bounded serialization qualified
     |
-    +-- PA8 WLAN sleep gate
+    +-- additional qualified defects
           |
-          +-- intentional mechanism
-          +-- runtime duty under investigation
+          +-- calibration restore self-requeue
+          +-- battery ADC timeout cleanup
+          +-- I2C timeout retirement
+          +-- WLAN GPIO interrupt mask
 
 
 WF200
@@ -77,28 +86,40 @@ WF200
     +-- experimental: 3.18.0
           |
           +-- Silicon Labs sleep-related fix
-          +-- successfully tested with Shelly FMAC 3.7.0
+          +-- interoperable with Shelly FMAC 3.7.0
 ```
 
-The current integrated experimental platform is:
+The current hardware-test platform is:
 
 ```text
-A1
-+
-C-C
-+
-WF200 3.18.0
+B2.1_OBS
 ```
 
-It has passed static qualification and successfully booted and operated on physical TRV hardware.
+It is based on the corrected B2.1 integration and adds passive PM52→cmd66 instrumentation.
 
-A separate **Stock Host Observer** is currently being qualified to observe the B2 reference-counter race, actual EM1/EM2 entry and PA8 sleep vetoes without correcting the stock behavior.
+The current observer-free next-stage candidate is:
+
+```text
+B2.2
+```
+
+B2.2 integrates all defects currently considered demonstrated, safely correctable and independently qualified for that build.
+
+B2.2 has passed offline construction and qualification and has the disposition:
+
+```text
+B2.2 OFFLINE RELEASE-CANDIDATE GO
+```
+
+It has **not yet been hardware-qualified** and is **not currently being flashed to the long-term test devices**.
+
+The current priority is long-term observation of B2.1_OBS against a stock 2.2.4 control.
+
+Active root-cause hunting and new firmware experiments are intentionally paused while that dataset develops.
 
 ---
 
-# Main Findings
-
-## 1. Battery Drain Predates Firmware 2.2.4
+# 1. Battery Drain Predates Firmware 2.2.4
 
 Battery-drain behavior has also been observed on firmware older than 2.2.4.
 
@@ -113,6 +134,7 @@ Firmware chronology is used throughout the project to distinguish:
 - shared mechanisms
 - later amplifiers
 - recovery mechanisms
+- version-specific defects
 - unrelated recurring workloads
 
 from the underlying historical problem.
@@ -203,6 +225,18 @@ real_beacon_skip
 ```
 
 Despite its name, this value is **not** a direct readback of the physical beacon-skip state programmed into the WF200.
+
+Recovery is currently treated as:
+
+```text
+symptom
++
+possible energy amplifier
++
+diagnostic window
+```
+
+It is not treated as the proven root cause of the historical battery drain.
 
 ---
 
@@ -319,7 +353,7 @@ The value can therefore become invalid as control evidence even though the under
 
 ---
 
-# 7. C2 — Self-Sustaining Recovery
+# 7. C2 — Stale-Evidence Recovery Recurrence
 
 The most important recurring-Recovery defect occurs after a qualifying event.
 
@@ -382,7 +416,23 @@ repeat
 
 A new beacon anomaly is therefore not required for every subsequent Recovery.
 
-This explains how one qualifying result can become an approximately minute-spaced self-sustaining Recovery loop.
+This explains how one qualifying result can become an approximately minute-spaced Recovery loop.
+
+Later stock runtime observations also showed that this state is **metastable rather than necessarily permanent**.
+
+A stock device was observed repeatedly recovering at approximately minute cadence and later leaving that state without a reboot or reconnect.
+
+The most likely control-flow explanation is that a later fresh valid statistics window replaced the problematic cached evidence.
+
+The exact transition was not captured because the relevant earlier debug lines had already left the runtime log buffer.
+
+C2 should therefore not be interpreted as:
+
+```text
+once triggered -> Recovery forever until reboot
+```
+
+but rather as a mechanism capable of extending a transient qualifying event into a much longer recurring-Recovery episode.
 
 ---
 
@@ -410,7 +460,7 @@ fresh + valid + qualifying measurement
         +---- no  -> continue normally
 ```
 
-C-C has now been tested on physical hardware.
+C-C has been tested on physical hardware.
 
 Testing confirms that:
 
@@ -418,18 +468,18 @@ Testing confirms that:
 - cloud connectivity remains operational
 - thermostat and valve operation remain available
 - beacon statistics continue operating
-- the known stale self-sustaining loop is removed
+- the known stale-evidence recurrence is removed
 - fresh qualifying Recovery can still occur
 
-Current C-C-based configurations have shown fresh Recovery rates around:
+Earlier C-C-based configurations showed fresh Recovery rates around:
 
 ```text
 ~27–30 events/hour
 ```
 
-during parts of the runtime tests.
+during parts of runtime testing.
 
-The remaining fresh trigger is still under investigation.
+This demonstrated that C-C corrected a real defect but did not by itself eliminate every fresh Recovery trigger or the observed battery-drain problem.
 
 ---
 
@@ -443,24 +493,17 @@ PS_MODE_ERROR
 
 indication.
 
-On one long-term observer run:
+A long-term observer run recorded thousands of host Beacon Recovery events while:
 
 ```text
-uptime:
-~63.9 h
-
-Beacon Recovery counter:
-3835
-
-D3_total:
-0
+D3_total = 0
 ```
-
-Thousands of host Beacon Recovery events therefore occurred without a recorded D3 `PS_MODE_ERROR`.
 
 This does not prove that the radio was always physically sleeping correctly.
 
 It does establish that this known WF200 error indication is not required for the observed host Recovery behavior.
+
+The host's `"Beacon skip error!"` terminology must therefore not be assumed to correspond directly to WF200 `PS_MODE_ERROR`.
 
 ---
 
@@ -485,11 +528,11 @@ They are separate from C1a/C1b/C2.
 
 ---
 
-# 11. A1
+# 11. A1 and the A1R Correction
 
-A1 is the experimental correction for the qualified PM lifecycle and ownership defects.
+A1 was the first integrated experimental correction for the qualified PM lifecycle and ownership defects.
 
-It addresses the project defect classes:
+It addressed the project defect classes:
 
 ```text
 G01
@@ -501,28 +544,57 @@ G18
 G19
 ```
 
-A1 does not blindly clear sleep blockers.
+A1 did not blindly clear sleep blockers.
 
-Instead, it preserves the reconstructed ownership and settlement model and corrects the identified failure paths.
+Instead, it attempted to preserve the reconstructed ownership and settlement model while correcting identified failure paths.
 
-The final integration passed extensive static qualification, including:
+Subsequent reverse engineering identified a regression introduced by A1 itself.
 
-```text
-36 / 36 canonical behavior/control scenarios
-```
-
-plus malformed and corruption tests.
-
-The final build contains:
+Five native callers use PM state 1 as a **temporary override**, rather than as a persistent new policy:
 
 ```text
-93 hooks
-210 relocations
+physical button
+HTTP /psovrd
+Cloud psovrd
+SSI settings_sta
+OTA launcher
 ```
 
-with zero unexplained application changes in the final reconstruction.
+Stock firmware preserves the preceding selected/deferred PM policy for these temporary overrides and restores it when the override expires.
 
-A1 has also been exercised on physical hardware as part of the integrated A1+C-C+WF200 3.18.0 firmware.
+The original A1 implementation could instead publish state 1 as the persistent selected policy.
+
+For example:
+
+```text
+previous selected policy: 3
+
+temporary request: 1
+
+expected:
+temporary 1 -> restore 3
+
+old A1:
+temporary 1 -> selected policy becomes 1
+```
+
+This was an **experimental A1 regression**.
+
+It is not evidence that the same defect exists in stock Shelly firmware and is not evidence that it caused the historical battery drain.
+
+The corrected implementation is named:
+
+```text
+A1R
+```
+
+A1R preserves the original A1 lifecycle corrections while recognizing only the five verified temporary-override return origins.
+
+The normal persistent request-1 path remains persistent.
+
+Recovery behavior remains separately handled.
+
+A1R passed the relevant executable and composition qualification and replaced A1 in the current experimental baseline.
 
 ---
 
@@ -544,7 +616,7 @@ Silicon Labs later released:
 WF200 3.18.0
 ```
 
-The corresponding changelog contains a relevant fix described as:
+The corresponding changelog contains a relevant sleep-related fix described as:
 
 ```text
 device not sleeping after power-save mode change
@@ -580,9 +652,9 @@ It does **not** establish that WF200 3.18.0 alone fixes the historical battery-d
 
 ---
 
-# 13. A1 + C-C + WF200 3.18.0
+# 13. Historical A1 + C-C + WF200 3.18.0 Platform
 
-The current integrated experimental correction platform combines:
+An important earlier integrated experimental platform combined:
 
 ```text
 A1
@@ -604,32 +676,20 @@ SHTRV-01_2.2.4_A1_C-C_WF200_3.18.0_EXPERIMENTAL.gbl
 GBL:
 
 ```text
-Size:
-1,123,380 bytes
-
 SHA-256:
 d91adb9138a528c090210f9a1776565fcfb55b17b2af7d8d46c83d8d1204e379
-
-END CRC32:
-F01262BC
-
-whole-file CRC32 residue:
-2144DF1C
 ```
 
 Application:
 
 ```text
-Size:
-1,066,544 bytes
-
 SHA-256:
 0bb530cfda66b4c45ada8d864d623ff4f952405a4da0f8f00f368a9f6116030d
 ```
 
-The artifact successfully installed through OTA and booted on physical hardware.
+The artifact successfully installed through OTA and operated on physical hardware.
 
-The device successfully initialized:
+It successfully initialized:
 
 ```text
 FMAC 3.7.0
@@ -639,29 +699,35 @@ WF200 3.18.0
 
 and continued normal WLAN, cloud, thermostat and valve operation.
 
-Long-term testing is ongoing.
+This platform is now historical.
+
+It was superseded after discovery of the A1 temporary-override regression and development of A1R.
+
+Historical measurements produced by this build remain valid observations and are not retroactively relabeled as B2.1.
 
 ---
 
-# 14. Fresh Recovery Still Exists
+# 14. Fresh Recovery and the Remaining Causal Question
 
-The integrated A1+C-C+WF200 3.18.0 device continues to show fresh qualifying Beacon Recovery events.
+Earlier A1/C-C/WF200 and C-C-based devices continued to show fresh qualifying Beacon Recovery events after the known stale-evidence recurrence had been removed.
 
-One representative long-term period produced approximately:
+This established an important distinction:
 
 ```text
-27–28 events/hour
+C2 recurrence
+!=
+fresh qualifying Recovery
 ```
 
-This is important because C-C has already removed the known stale-evidence recurrence.
+The remaining question became:
 
-The remaining events therefore represent a different question:
+> Why does the host sometimes obtain a fresh measurement that qualifies for Recovery, and under what conditions does that correlate with actual excessive power consumption?
 
-> Why does the host still occasionally obtain a fresh measurement that qualifies for Recovery?
+Current evidence does not justify treating every fresh Recovery as a battery-drain event.
 
-Disabling FRITZ!Box Mesh/Band Steering did not eliminate this behavior in the current test.
+The working model is that network/WLAN conditions may produce a transient abnormal estimator state, after which stock control defects and PM interactions can amplify the event.
 
-The remaining trigger is still being investigated.
+That model remains a hypothesis rather than a fully demonstrated causal chain.
 
 ---
 
@@ -712,18 +778,11 @@ The stock TRV configures its RTC/tickless scheduler timebase from the:
 LFXO
 ```
 
-The EM3 path disables:
+The EM3 path disables the relevant low-frequency clocking assumptions while EM2 retains the required timebase.
 
-```text
-LFXO
-LFRCO
-```
+Simply clearing B3 and allowing EM3 would therefore break assumptions of the current scheduler/tickless implementation.
 
-while EM2 retains the required low-frequency clock.
-
-Simply clearing B3 and allowing EM3 would therefore break the assumptions of the current scheduler/tickless implementation.
-
-The project does **not** consider the permanent B3 contribution a battery-drain bug.
+The project does **not** consider the permanent B3 contribution a demonstrated battery-drain bug.
 
 The intended target is correct EM2 entry.
 
@@ -754,11 +813,15 @@ Some task-side paths can be preempted between the load and store while other B2/
 
 This creates a real lost-update race.
 
+The defect has been demonstrated statically and through executable qualification.
+
+A bounded serialization correction is now part of B2.1 and B2.2.
+
 ---
 
 # 18. Phantom B2 Contribution
 
-One verified native schedule can produce:
+One verified schedule can produce:
 
 ```text
 B2 = 1
@@ -807,9 +870,11 @@ instead of:
 EM2
 ```
 
-A phantom B2 contribution could therefore create persistent excess host awake power until another event repairs the count or the device resets.
+A phantom B2 contribution could therefore create persistent excess host power until another event repairs the count or the device resets.
 
-Whether this occurs frequently on physical draining devices is not yet established.
+The implementation defect is demonstrated.
+
+Its real-world occurrence rate and quantitative battery impact have not been established.
 
 ---
 
@@ -835,9 +900,7 @@ The host may then permit EM2 even though one subsystem still requires EM1.
 
 The defect therefore affects correctness in both directions.
 
-This is a demonstrated firmware concurrency defect.
-
-Its field occurrence rate and battery impact remain to be measured.
+The B2.1/B2.2 correction serializes the relevant counter check/read-modify-write operations while preserving the existing ownership semantics and caller behavior.
 
 ---
 
@@ -859,124 +922,207 @@ Conceptually:
 
 ```text
 sleep selected
-      |
-      v
+     |
+     v
 PA8?
-      |
-      +-- LOW  -> WFI
-      |
-      +-- HIGH -> return without WFI
+     |
+     +-- LOW  -> WFI
+     |
+     +-- HIGH -> return without WFI
 ```
 
 This is not automatically a bug.
 
 The mechanism appears intended to prevent host sleep while the WLAN interface has pending work.
 
-The open question is whether PA8 repeatedly or persistently prevents WFI during a battery-drain episode.
+A persistent or high-duty PA8 condition could nevertheless prevent actual low-power entry.
+
+No evidence currently establishes PA8 itself as defective.
 
 ---
 
-# 21. Stock Host Observer
+# 21. PM52→cmd66 Observer
 
-The next diagnostic firmware is intentionally based on clean stock 2.2.4.
+The later diagnostic strategy focused directly on the relationship between host PM requests and the WF200 statistics used by Beacon Recovery.
 
-It should preserve:
+A passive PM52→cmd66 observer was developed.
 
-```text
-stock Beacon Recovery
-stock PM lifecycle
-stock B2/B3 accounting
-stock Final-Sleep
-stock PA8 handling
-stock WF200 3.16.1
-```
+It records, without generating additional WF200 requests:
 
-and add only passive instrumentation.
-
-The observer is intended to measure:
-
-- current B2/B3/O state
-- B2 acquire/release activity
-- owner-specific B2 activity
-- shadow ownership
-- B2 mismatch
-- EM1 entry count
-- EM2 entry count
-- WFI attempts
-- PA8 veto count
-- first-fault state
+- actual PM52 request payloads
+- native PM52 results
+- A1R completion decisions
+- existing periodic cmd66 issue/results
+- fresh estimator operands
+- connection epochs
 - recent relevant events
 
-The observer must **not** serialize or repair the stock B2 race.
+The observer uses a bounded in-memory ring and freezes the first relevant full-width fault state.
 
-That noninterference requirement is part of its qualification.
+It does **not** add:
 
----
+- a new WF200 command
+- a new timer
+- a new task
+- a new queue
+- automatic network traffic
+- flash writes
+- PM policy changes
 
-# 22. Observer Status
+Readout occurs only through an explicit `/status` request.
 
-A working Stock Host Observer application has been constructed.
+The observer is diagnostic instrumentation.
 
-Initial independent checks confirmed preservation of:
+Although it was designed and qualified for noninterference, any added instrumentation can theoretically perturb timing.
 
-```text
-stock B2 helpers
-stock sleep selector
-permanent B3 contribution
-stock WF200 payload
-```
-
-and initial observer bookkeeping tests have passed.
-
-However, the observer is **not yet qualified for device testing**.
-
-Remaining qualification includes:
-
-- emitted Thumb wrapper execution
-- register/flags/LR/SP preservation
-- PRIMASK behavior
-- race-window preservation
-- status serialization
-- stack/headroom analysis
-- RAM lifetime
-- final GBL reconstruction
-- deterministic construction
-
-The final qualification verdict must be either:
-
-```text
-STOCK HOST OBSERVER QUALIFIED FOR CONTROLLED DEVICE TEST
-```
-
-or:
-
-```text
-NO-GO
-```
-
-No intermediate observer build should be treated as qualified firmware.
+Observer results are therefore interpreted with that limitation in mind.
 
 ---
 
-# 23. Experimental Firmware Overview
+# 22. B2.1 and B2.1_OBS
 
-| Variant | Purpose | Status |
-|---|---|---|
-| Stock 2.2.4 | reference | hardware |
-| Patch A | bypass Beacon Recovery | historical hardware-tested isolation |
-| Patch B | suppress periodic mDNS restart | hardware-tested isolation |
-| Patch A+B | combined isolation | historical hardware-tested experiment |
-| C-C | correct C1a/C1b/C2 | hardware tested |
-| D3 Observer | observe WF200 `PS_MODE_ERROR` | hardware tested |
-| WF200 3.18.0 | newer radio PM firmware | hardware tested |
-| C-C + WF200 3.18.0 | Recovery correction + newer radio | hardware tested |
-| A1 | PM lifecycle correction | qualified and hardware tested in integrated build |
-| A1 + C-C + WF200 3.18.0 | integrated correction platform | hardware testing ongoing |
-| Stock Host Observer | observe B2/PA8/EM1/EM2 | qualification in progress |
+The corrected observer-free integrated baseline is:
 
-Detailed patch information is maintained in:
+```text
+B2.1
+```
 
-[`docs/patch/README.md`](docs/patch/README.md)
+B2.1 contains:
+
+```text
+A1R
++
+C-C
++
+B2 serialization
++
+minimal MQTT PUBLISH guard
++
+WF200 3.18.0
+```
+
+The observer-enabled long-term-test build is:
+
+```text
+B2.1_OBS
+```
+
+It adds the PM52→cmd66 observer and an explicit research-build identity while retaining native Shelly version identity:
+
+```text
+2.2.4
+```
+
+The research identity is exposed separately as:
+
+```text
+research_build: B2.1_OBS
+```
+
+B2.1_OBS passed integration and noninterference qualification before controlled hardware deployment.
+
+The qualified GBL has:
+
+```text
+SHA-256:
+7d7063d81372063dfe0d629d26e614f7dd2ed448b0e65a393e866c79025eac7a
+```
+
+The reconstructed application has:
+
+```text
+SHA-256:
+65e17c4c04bdde23f545ebdb3283d71eef746e8dafba97ed9f6e451b6310c215
+```
+
+B2.1_OBS is currently the primary long-term hardware-test platform.
+
+---
+
+# 23. B2.2 — All Known Qualified Fixes
+
+While the B2.1_OBS long-term experiment continues unchanged, offline analysis has qualified additional independent firmware defects.
+
+These corrections were composed into:
+
+```text
+B2.2
+```
+
+B2.2 is intentionally observer-free.
+
+Its exact correction set is:
+
+```text
+1. A1R including the A1 PM lifecycle correction set
+2. C-C
+3. B2 serialization
+4. minimal MQTT PUBLISH guard
+5. official WF200 3.18.0
+6. Calibration Restore Guard
+7. P01 battery ADC PA3 release
+8. P02 I2C timeout retirement
+9. P03 WLAN GPIO interrupt-mask correction
+```
+
+There is no tenth correction implicitly included in the name.
+
+B2.2 therefore means:
+
+```text
+All Known Qualified Fixes
+```
+
+not:
+
+```text
+every suspicious code path found during research
+```
+
+Known findings that remain deferred include, among others:
+
+- P04 motor completion timeout/accounting behavior
+- P11 raw ADC transient publication
+- calibration `valve_min_percent` mixed-unit issue
+- other unqualified or lower-priority candidates
+- EM3 redesign
+- diagnostic timing modifications
+
+The final B2.2 GBL has:
+
+```text
+SHA-256:
+912983973a5467241397b9dd967ee0039440c7d77780a2a97ee494b1a507860c
+```
+
+The reconstructed application has:
+
+```text
+SHA-256:
+7ee593265c76abd8cd628a81133d4b1310c1ae24c9ebe2ca3f2c2948acfc64f9
+```
+
+The final offline disposition is:
+
+```text
+B2.2 OFFLINE RELEASE-CANDIDATE GO
+```
+
+This means the build passed its defined offline qualification.
+
+It does **not** mean:
+
+```text
+battery drain solved
+```
+
+and it does **not** mean:
+
+```text
+hardware qualified
+```
+
+B2.2 is intentionally not being flashed during the current B2.1_OBS long-term experiment.
 
 ---
 
@@ -1009,20 +1155,23 @@ The physical test devices are reused as the investigation progresses.
 
 The firmware configuration at the time of a dataset is therefore more important than the device suffix itself.
 
-Current or recent important roles include:
+The current long-term experiment uses:
 
 | Device | Configuration | Role |
 |---|---|---|
-| `.11` | 2.2.4 D3 observer / WF200 3.16.1 | D3 comparison |
-| `.77` | 2.2.4 + Patch B | completed mDNS-isolation discharge test |
-| `.88` | 2.2.4 + C-C / WF200 3.16.1 | C-C long-term reference |
-| `.229` | stock 2.2.4 | stock reference |
-| `.234` | A1 + C-C + WF200 3.18.0 | integrated correction canary |
-| `.237` | C-C + WF200 3.18.0 | combined reference |
+| `.77` | B2.1_OBS | long-term experimental |
+| `.88` | B2.1_OBS | long-term experimental |
+| `.11` | B2.1_OBS | long-term experimental |
+| `.71` | B2.1_OBS | long-term experimental |
+| `.234` | B2.1_OBS | long-term experimental / charged reference |
+| `.61` | B2.1_OBS | long-term experimental |
+| `.97` | stock 2.2.4 | stock control |
 
-Additional devices are used for historical and secondary comparisons.
+Historical device identities and firmware roles are retained in the corresponding datasets and test documentation.
 
 Datasets crossing a firmware transition must be split at that transition.
+
+The stock `.97` control is intentionally left unmodified during the current experiment.
 
 ---
 
@@ -1030,7 +1179,7 @@ Datasets crossing a firmware transition must be split at that transition.
 
 A dedicated logger collects runtime data from multiple physical TRVs.
 
-The normal interval is approximately:
+The normal logging interval is approximately:
 
 ```text
 30 minutes
@@ -1057,7 +1206,21 @@ Collected fields include, where available:
 
 Daily reports are generated for longer-term comparison.
 
-Battery voltage is generally more useful than reported percentage for short-term trend comparison, but neither is a direct measurement of energy consumption.
+Battery voltage is generally more useful than reported percentage for short-term trend comparison.
+
+Reverse engineering of the stock battery reporting path showed that the displayed percentage is derived from the measured battery voltage using a stateless integer mapping.
+
+It is not a coulomb counter or direct measurement of remaining energy.
+
+Therefore:
+
+```text
+battery %
+```
+
+should not be treated as an independent high-resolution energy measurement.
+
+Neither percentage nor voltage is equivalent to direct current or energy measurement.
 
 Valve movement must also be considered because it represents significant real mechanical work.
 
@@ -1093,13 +1256,48 @@ It must therefore not be interpreted as:
 percentage of time physically asleep
 ```
 
-The Stock Host Observer is intended to provide more direct information about actual host low-power entry decisions.
+Observer data and host control-flow reconstruction provide more direct information about low-power decisions, but direct electrical measurement would still be required to establish actual energy consumption.
 
 ---
 
 # 28. Current Battery-Drain Model
 
 The available evidence supports a multi-mechanism model.
+
+A current working hypothesis is:
+
+```text
+network / WLAN transient
+        |
+        v
+abnormal fresh beacon estimator
+        |
+        v
+Beacon Recovery
+        |
+        +-- stock C2 stale-evidence recurrence
+        |
+        +-- additional PM transitions
+        |
+        v
+host / WF200 PM interaction
+        |
+        +-- host PM lifecycle defects
+        |
+        +-- B2 blocker-accounting race
+        |
+        +-- PA8 sleep veto behavior
+        |
+        +-- WF200 power-save behavior
+        |
+        v
+possible excessive awake/current residency
+        |
+        v
+battery drain
+```
+
+This is a **working causal model**, not a proven complete causal chain.
 
 Potentially relevant layers include:
 
@@ -1120,10 +1318,10 @@ normal thermostat / valve workload
         |
         +-- WF200 power-save behavior
         |
-        +-- AP / RF environment
+        +-- AP / RF / network environment
 ```
 
-Several of these now contain demonstrated firmware defects.
+Several of these contain demonstrated firmware defects.
 
 That still does not establish their quantitative energy contribution.
 
@@ -1131,34 +1329,59 @@ A code defect can exist without being the dominant battery consumer.
 
 Likewise, a high-frequency workload can consume energy without being the original root cause.
 
+The project therefore distinguishes:
+
+```text
+defect
+!=
+trigger
+!=
+amplifier
+!=
+root cause
+!=
+measured energy contribution
+```
+
 ---
 
 # 29. What Has Been Established
 
 The investigation currently supports the following technical conclusions:
 
+- battery-drain behavior predates firmware 2.2.4
 - periodic connected mDNS activity is a real recurring workload in later firmware
 - Patch B suppresses the targeted periodic restart
 - periodic mDNS is not required for recurring Beacon Recovery
 - 2.2.4 contains a real Beacon Recovery mechanism
-- good RSSI does not prevent the observed recurring Recovery behavior
+- good RSSI does not prevent observed recurring Recovery behavior
 - `real_beacon_skip` is a host-derived estimator, not direct physical beacon-skip state
 - C1a changes valid positive estimator values through signed interpretation
 - C1b allows a counter delta to represent a longer window than the fixed formula assumes
 - C2 can reuse historical Recovery evidence without a fresh calculation
-- C-C corrects these validity problems while retaining fresh Recovery
-- fresh Recovery still occurs after C-C
+- C2 can create long recurring Recovery episodes
+- the C2 state is metastable and can later clear without reboot
+- C-C corrects the identified estimator/control-validity problems while retaining fresh Recovery
+- fresh Recovery can still occur after C-C
 - known D3 `PS_MODE_ERROR` is not required for host Beacon Recovery
 - multiple host PM lifecycle/ownership defects exist
-- A1 corrects the qualified PM lifecycle defect set
+- the original experimental A1 implementation introduced a temporary-override regression
+- A1R corrects that experimental regression while preserving the intended A1 correction set
 - FMAC 3.7.0 can operate with the tested WF200 3.18.0 integration
-- the permanent B3 contribution has a valid RTC/LFXO reason
+- the permanent B3 contribution has a valid RTC/tickless reason
 - intended normal deepest host idle is EM2
 - shared B2 blocker accounting contains a real task-preemption race
 - the B2 race can produce either phantom or lost ownership
+- bounded B2 serialization has been independently qualified
 - PA8 can independently veto WFI
-- A1 does not correct the global B2 RMW race
-- the integrated A1+C-C+WF200 3.18.0 firmware boots and operates on physical hardware
+- the calibration restore path contained a qualified self-requeue defect
+- the battery ADC timeout path contains a qualified cleanup defect
+- the display I2C timeout path contains a qualified retirement defect
+- the WLAN GPIO interrupt-disable path contains a qualified mask defect
+- B2.1_OBS passed its defined qualification and is running on physical test devices
+- B2.2 composes the currently qualified correction set without observer instrumentation
+- B2.2 passed its defined offline qualification
+- B2.2 has not yet been hardware-qualified
 
 ---
 
@@ -1171,14 +1394,16 @@ The project does **not** currently claim:
 - that periodic mDNS is the sole cause
 - that WF200 3.18.0 alone fixes the problem
 - that C-C alone fixes the problem
-- that A1 alone fixes the problem
-- that the integrated firmware is a final production fix
+- that A1R alone fixes the problem
+- that B2 corruption is the historical root cause
 - that every fresh Beacon Recovery event is erroneous
-- that B2 corruption has already been observed on physical hardware
 - that PA8 is defective
 - that EM3 should be enabled
 - that `/stats sleep_ratio` represents physical sleep residency
 - that the exact energy contribution of each mechanism is known
+- that B2.1_OBS has already proven restoration of normal battery lifetime
+- that B2.2 has been hardware-qualified
+- that B2.2 is a final production fix
 - that a specific final battery lifetime has been restored
 
 The project currently has no direct electrical current measurements.
@@ -1187,47 +1412,64 @@ The project currently has no direct electrical current measurements.
 
 # 31. Current Research Direction
 
-The immediate priority is the host-sleep observer.
+The current research phase is intentionally conservative.
 
-The sequence is:
+B2.1_OBS has completed its pre-deployment qualification and is now undergoing long-term hardware observation.
+
+The current strategy is:
 
 ```text
-Stock 2.2.4
-    |
-    v
-passive Host Observer
-    |
-    v
-measure B2 / PA8 / EM1 / EM2
-    |
-    +-- no B2 corruption observed
-    |       |
-    |       +-- continue investigation
-    |
-    +-- B2 corruption observed
-            |
-            v
-    bounded B2 serialization fix
-            |
-            v
-    observer A/B comparison
-            |
-            v
-    integrate qualified fix into
-    A1 + C-C + WF200 3.18.0
+B2.1_OBS long-term test
+        |
+        +-- six experimental devices
+        |
+        +-- one stock 2.2.4 control
+        |
+        v
+observe battery voltage / runtime / PM behavior
+        |
+        +-- no significant drain
+        |       |
+        |       v
+        |   remove observer
+        |       |
+        |       v
+        |   observer-free regression test
+        |       |
+        |       v
+        |   evaluate final candidate
+        |
+        +-- drain persists
+                |
+                v
+        preserve first-fault evidence
+                |
+                v
+        resume deeper root-cause analysis
 ```
 
-In parallel:
+During this phase:
 
-- continue long-term A1+C-C+WF200 3.18.0 testing
-- continue C-C reference testing
-- compare cloud-on/cloud-off behavior
-- continue WLAN/AP isolation tests
-- investigate the remaining fresh Beacon Recovery trigger
+- no new network variables are intentionally introduced
+- no new firmware is flashed merely to test additional hypotheses
+- occasional Beacon Recovery alone is not treated as sufficient reason to restart root-cause analysis
+- the stock control remains stock
+- B2.1_OBS devices remain on B2.1_OBS
+- B2.2 remains offline
+- static/offline analysis may continue without disturbing the experiment
 
-The goal is not to remove every source of WLAN activity.
+If a B2.1_OBS device develops significant drain, the priority is to preserve:
 
-The goal is to correct demonstrated firmware defects while preserving legitimate power-management and reliability behavior.
+```text
+/status
+/stats
+/debug/log
+observer state
+```
+
+before rebooting, reflashing or changing network conditions.
+
+The goal is to capture the first useful fault state rather than accidentally repair it before collecting evidence.
 
 ---
 
@@ -1268,6 +1510,18 @@ Important documents include:
 
 [`docs/reverse-engineering/power-management-and-sleep.md`](docs/reverse-engineering/power-management-and-sleep.md)
 
+### Host sleep and blocker accounting
+
+[`docs/reverse-engineering/host-sleep-and-blocker-accounting.md`](docs/reverse-engineering/host-sleep-and-blocker-accounting.md)
+
+### PM lifecycle and A1/A1R
+
+[`docs/reverse-engineering/pm-lifecycle-and-a1.md`](docs/reverse-engineering/pm-lifecycle-and-a1.md)
+
+### WF200 firmware
+
+[`docs/reverse-engineering/wf200-firmware.md`](docs/reverse-engineering/wf200-firmware.md)
+
 ### AP selection and roaming
 
 [`docs/reverse-engineering/ap-selection-and-roaming.md`](docs/reverse-engineering/ap-selection-and-roaming.md)
@@ -1283,6 +1537,10 @@ Important documents include:
 ### Battery testing
 
 [`docs/testing/battery-testing.md`](docs/testing/battery-testing.md)
+
+### Experimental device matrix
+
+[`docs/testing/experimental-device-matrix.md`](docs/testing/experimental-device-matrix.md)
 
 ---
 
@@ -1305,10 +1563,17 @@ Patch/construction tooling uses fail-closed validation and should verify, as app
 - output CRCs
 - reconstructed application
 - deterministic output
+- absence of unexplained changes
 
 A failed precondition should stop the build.
 
-It should never silently adapt offsets to an unknown firmware image.
+Patch tooling should never silently adapt offsets to an unknown firmware image.
+
+Composition is also treated as a separate qualification problem.
+
+Two individually correct patches are not automatically assumed to remain correct when combined.
+
+Final integrated builds are therefore re-qualified against the composed binary.
 
 ---
 
@@ -1328,6 +1593,14 @@ The research repository may also contain construction and verification scripts u
 
 A research script being public does not mean the corresponding experimental firmware has completed hardware qualification.
 
+Likewise:
+
+```text
+offline qualification
+!=
+hardware qualification
+```
+
 Always check the documented status of the specific variant.
 
 ---
@@ -1342,13 +1615,23 @@ For the local test environment, the HTTP server must be reachable on:
 TCP port 80
 ```
 
-Port 8000 caused OTA retrieval problems.
+Port 8000 caused OTA retrieval problems in the tested setup.
 
 On macOS, binding a Python HTTP server to port 80 normally requires elevated privileges.
 
 OTA acceptance is not equivalent to firmware qualification.
 
-A build must still pass its relevant static, binary, container and runtime checks.
+A build must still pass its relevant:
+
+- static checks
+- binary checks
+- executable behavior tests
+- container checks
+- integration checks
+- runtime checks
+- long-term tests
+
+as applicable to the purpose of that build.
 
 ---
 
@@ -1378,6 +1661,7 @@ The repository should not contain:
 - credentials
 - private network identifiers
 - sensitive device information
+- private security-research material intended for coordinated disclosure
 
 General principle:
 
@@ -1404,10 +1688,17 @@ The investigation combines:
 - controlled OTA testing
 - isolated firmware variants
 - long-term battery logging
+- negative testing
+- composition testing
+- independent verification of critical patch behavior
 
 Decompiler output is used as supporting information.
 
 Important control-flow conclusions are checked against native instructions and, where practical, executable behavior.
+
+Diagnostic firmware and production-oriented corrections are deliberately separated.
+
+A diagnostic timing modification that helps expose a mechanism is not automatically suitable for a final correction.
 
 ---
 
@@ -1431,7 +1722,10 @@ attempted falsification
 controlled modification
     |
     v
-static qualification
+static / executable qualification
+    |
+    v
+integration qualification
     |
     v
 runtime validation
@@ -1454,7 +1748,31 @@ does not automatically mean:
 Battery drain solved
 ```
 
+and:
+
+```text
+Offline release-candidate GO
+```
+
+does not automatically mean:
+
+```text
+Hardware-qualified final firmware
+```
+
 The objective is to understand why a mechanism exists, determine whether its control logic is valid, preserve legitimate functionality and correct only behavior that the available evidence demonstrates is defective.
+
+For a final correction, the project distinguishes:
+
+```text
+original defect
+violated invariant
+correction
+noninterference / regression qualification
+hardware validation
+```
+
+These stages should not be collapsed into a single claim.
 
 ---
 
@@ -1469,6 +1787,7 @@ Contributions are welcome when they:
 - reproduce a firmware defect
 - improve patch verification
 - provide alternative technical explanations
+- independently test the qualified correction set
 
 Please read:
 
@@ -1489,6 +1808,8 @@ See:
 [`SECURITY.md`](SECURITY.md)
 
 for the project's reporting policy.
+
+Security findings are deliberately separated from the battery-drain investigation when public disclosure could create unnecessary risk.
 
 This repository is an independent research project and is not an official Shelly security or support channel.
 
@@ -1513,6 +1834,8 @@ Do not deploy experimental firmware where failure could create an unsafe conditi
 Always retain a known-good recovery path.
 
 Testing should only be performed on devices and networks you own or are authorized to use.
+
+B2.1_OBS and B2.2 should not be interpreted as production firmware merely because they passed their respective research qualification gates.
 
 ---
 

@@ -2,9 +2,7 @@
 
 ## Scope
 
-This document describes the beacon statistics used by Shelly TRV Gen1 firmware
-2.2.4 and how the host firmware derives `real_beacon_skip` from the cumulative
-WF200 received-beacon counter.
+This document describes the beacon statistics used by Shelly TRV Gen1 firmware 2.2.4 and how the host firmware derives `real_beacon_skip` from the cumulative WF200 received-beacon counter.
 
 The relevant path is:
 
@@ -29,12 +27,11 @@ delta = C - P
 Beacon Recovery decision
 ```
 
-The important distinction is that `real_beacon_skip` is not a direct WF200
-power-save state and is not a direct report of the currently programmed beacon
-skip.
+The important distinction is:
 
-It is a host-calculated value derived from the change of a cumulative WF200
-statistic.
+> `real_beacon_skip` is not a direct WF200 power-save state and is not a direct readback of the currently programmed beacon-skip parameter.
+
+It is a host-derived value calculated from the change of a cumulative WF200 statistic.
 
 This document focuses on:
 
@@ -43,33 +40,34 @@ This document focuses on:
 - the host-side baseline `P`
 - the calculation of `real_beacon_skip`
 - measurement-window validity
-- the relationship between the cached value and Beacon Recovery
-- the remaining boundary between known host behavior and protected WF200
-  internals
+- C1a/C1b/C2
+- cached diagnostic state versus fresh control evidence
+- runtime observations
+- the boundary between known host behavior and protected WF200 internals
+- the current PM52→cmd66 observer
+- the relevance of this mechanism to the battery-drain investigation
 
-The arithmetic and signed-value problem are also discussed in:
+Detailed arithmetic is also documented in:
 
 [`real-beacon-skip.md`](real-beacon-skip.md)
 
-The complete recovery path is documented in:
+The complete Recovery control flow is documented in:
 
 [`recovery-mechanism.md`](recovery-mechanism.md)
 
 ---
 
-## Summary
+# 1. Summary
 
-Firmware 2.2.4 does not count received WLAN beacons directly in the Shelly
-application.
+Firmware 2.2.4 does not count WLAN beacons directly inside the Shelly application.
 
-Instead, the host periodically requests statistics from the WF200 subsystem
-using command:
+Instead, the host periodically requests statistics from the WF200 subsystem using:
 
 ```text
-0x66
+command 0x66
 ```
 
-The returned statistics contain, among other fields:
+The returned structure contains, among other fields:
 
 ```text
 received beacon count
@@ -77,10 +75,9 @@ missed beacon count
 TBTT difference
 ```
 
-The host uses the cumulative received-beacon count for the known
-`real_beacon_skip` calculation.
+The known `real_beacon_skip` calculation uses the cumulative received-beacon count.
 
-For clarity, this document uses:
+For clarity:
 
 ```text
 C = current cumulative received-beacon count
@@ -88,8 +85,7 @@ P = previous host-side received-beacon baseline
 R = cached real_beacon_skip byte
 ```
 
-When a usable previous baseline exists and the counter has increased, the host
-approximately performs:
+When a usable previous baseline exists and the counter has increased, the host approximately performs:
 
 ```text
 delta = C - P
@@ -99,10 +95,9 @@ R = uint8_t(600 / delta)
 P = C
 ```
 
-The missed-beacon counter and TBTT-difference field are not used to normalize
-this calculation.
+The missed-beacon counter and TBTT-difference field are not used to normalize this calculation.
 
-Three separate host-side problems were identified around this mechanism:
+Three independent host-side validity defects were identified:
 
 ```text
 C1a
@@ -112,22 +107,16 @@ C1b
 measurement-window / baseline validity
 
 C2
-historical R reused as current recovery evidence
+historical R reused as fresh Recovery evidence
 ```
 
-These defects exist in the host application and do not require the WF200
-statistics themselves to be faulty.
-
-The exact internal meaning of all WF200 beacon statistics remains partly
-unknown because the protected WF200 implementation has not been fully reverse
-engineered.
+These defects do not require the WF200 cumulative statistic itself to be incorrect.
 
 ---
 
-## WF200 Statistics Source
+# 2. WF200 Statistics Source
 
-The beacon statistics consumed by the Shelly application originate in the
-WF200 WLAN subsystem.
+The beacon statistics consumed by the Shelly application originate in the WF200 WLAN subsystem.
 
 The host requests them through:
 
@@ -149,7 +138,7 @@ WF200 WLAN subsystem
 host-side statistics structure
 ```
 
-The relevant returned values include:
+Relevant returned fields include:
 
 ```text
 received beacon count
@@ -157,18 +146,15 @@ missed beacon count
 TBTT difference
 ```
 
-The Shelly application therefore consumes beacon statistics maintained by the
-WLAN subsystem rather than incrementing its own application-level counter for
-every received beacon.
+The Shelly application therefore consumes statistics maintained below the host application.
 
-The exact protected WF200 code responsible for maintaining these statistics is
-outside the host application.
+The protected WF200 code responsible for maintaining the counters has not been fully reconstructed.
 
 ---
 
-## Received-Beacon Counter
+# 3. Received-Beacon Counter
 
-The received-beacon field is a cumulative WF200 statistic.
+The received-beacon field behaves as a cumulative WF200 statistic.
 
 For example:
 
@@ -177,29 +163,28 @@ P = 12000
 C = 12030
 ```
 
-The host does not directly use:
+The host does not use:
 
 ```text
 12030
 ```
 
-as the Beacon Recovery measurement.
+directly as the Recovery measurement.
 
-Instead it calculates:
+Instead:
 
 ```text
 delta = C - P
       = 30
 ```
 
-The known recovery measurement therefore depends on the difference between two
-cumulative samples.
+The derived value therefore depends on the difference between two cumulative samples.
 
-This distinction is important:
+Important distinctions are:
 
 ```text
 absolute received-beacon count
-              !=
+            !=
 real_beacon_skip
 ```
 
@@ -207,27 +192,21 @@ and:
 
 ```text
 WF200 received-beacon statistic
-              !=
+            !=
 currently programmed beacon skip
 ```
 
-The exact internal WF200 event that increments the cumulative received-beacon
-counter has not been independently reconstructed.
+The exact internal WF200 event that increments the cumulative counter remains unresolved.
 
-That uncertainty matters when trying to reproduce the original engineering
-model, but it does not prevent analysis of the host-side arithmetic and
-baseline lifecycle.
+That uncertainty does not prevent host-side arithmetic and lifecycle analysis.
 
 ---
 
-## Missed-Beacon Counter
+# 4. Missed-Beacon Counter
 
-Command `0x66` also returns a separate missed-beacon statistic.
+Command `0x66` also returns a missed-beacon statistic.
 
-The host stores this value, but the identified `real_beacon_skip` calculation
-does not directly use it.
-
-The firmware does not calculate a ratio such as:
+The host stores this value, but the known `real_beacon_skip` calculation does not perform a ratio such as:
 
 ```text
 received
@@ -235,28 +214,21 @@ received
 received + missed
 ```
 
-for the Beacon Recovery decision.
-
-Instead, the known calculation uses:
+Instead, the identified arithmetic is:
 
 ```text
 600 / (C - P)
 ```
 
-where `C` and `P` are cumulative received-beacon samples.
+The exact treatment of intentionally skipped beacon opportunities by the WF200 missed-beacon statistic remains unresolved.
 
-The exact treatment of deliberately skipped beacon opportunities by the WF200
-missed-beacon statistic remains unknown.
-
-This is especially relevant under Fast Power Save because a beacon that the
-radio intentionally does not wake for must not automatically be interpreted
-as an RF reception failure.
+This is especially relevant under Fast Power Save, because an intentionally skipped beacon opportunity is not automatically equivalent to an RF reception failure.
 
 ---
 
-## TBTT Difference
+# 5. TBTT Difference
 
-The returned statistics also contain a TBTT-related value.
+The statistics response also contains a TBTT-related value.
 
 TBTT means:
 
@@ -264,12 +236,11 @@ TBTT means:
 Target Beacon Transmission Time
 ```
 
-This field contains timing-related information.
+The field contains timing-related information.
 
-It is not used as the timebase for the identified `real_beacon_skip`
-calculation.
+However, the known host calculation does not use it as the timebase for `real_beacon_skip`.
 
-In particular, the host does not perform:
+The host does not perform:
 
 ```text
 received-beacon delta
@@ -277,22 +248,27 @@ received-beacon delta
 measured TBTT interval
 ```
 
-or otherwise normalize `C - P` using the returned TBTT-difference field.
+for this estimator.
 
-This becomes important when considering the validity of the fixed numerator
-`600`.
+This matters because the numerator:
+
+```text
+600
+```
+
+is fixed.
 
 ---
 
-## Host-Side Calculation
+# 6. Host-Side Calculation
 
-With a usable previous baseline:
+With:
 
 ```text
 P != 0
 ```
 
-and a newer cumulative value:
+and:
 
 ```text
 C > P
@@ -310,44 +286,39 @@ R = uint8_t(quotient)
 P = C
 ```
 
-The resulting byte `R` is cached and later consumed by the Beacon Recovery
-logic.
-
-The complete path is therefore:
+The complete path is:
 
 ```text
 command 0x66
-      |
-      v
+     |
+     v
 current received count C
-      |
-      +---- previous baseline P
-      |
-      v
+     |
+     +---- previous baseline P
+     |
+     v
 C - P
-      |
-      v
+     |
+     v
 delta
-      |
-      v
+     |
+     v
 600 / delta
-      |
-      v
+     |
+     v
 8-bit R
-      |
-      v
+     |
+     v
 Beacon Recovery predicate
 ```
 
 The arithmetic is clear from the host firmware.
 
-What is not explicitly documented by the firmware is the original engineering
-reasoning behind treating the resulting quotient as an effective beacon-skip
-measurement.
+The original engineering rationale behind interpreting this quotient as an effective beacon-skip measure is not explicitly documented by the firmware.
 
 ---
 
-## The Fixed Numerator `600`
+# 7. The Fixed Numerator `600`
 
 The numerator:
 
@@ -357,67 +328,59 @@ The numerator:
 
 is hard-coded.
 
-The surrounding logic is consistent with the firmware trying to infer an
-effective beacon-skip relationship from the number of received beacons over an
-assumed measurement interval.
+The surrounding design is consistent with an attempt to estimate effective beacon reception across an expected observation interval.
 
-A conceptual interpretation is:
+Conceptually:
 
 ```text
 nominal beacon opportunities
-            /
+          /
 received beacons
-            =
-effective beacon skip
+          =
+effective beacon-density estimate
 ```
 
-The important implementation detail is that the host does not store a
-corresponding elapsed-time value together with `P`.
+The important implementation detail is that the host does not store a corresponding elapsed-time value together with `P`.
 
-The calculation therefore assumes that the interval represented by:
+The formula therefore assumes that:
 
 ```text
 C - P
 ```
 
-matches the interval represented by the fixed numerator:
+represents the interval for which:
 
 ```text
 600
 ```
 
-If the baseline survives longer than intended, the cumulative counter can be
-perfectly correct while the resulting quotient is no longer representative of
-the intended measurement window.
+is appropriate.
 
-This is a host-side measurement-validity issue.
+If the baseline survives longer than intended, the cumulative counter may remain perfectly correct while the quotient becomes invalid for the intended measurement model.
+
+That is a host-side validity problem.
 
 ---
 
-## Normal Baseline Lifecycle
+# 8. Normal Baseline Lifecycle
 
-Under normal conditions a previous baseline exists:
+Under normal conditions:
 
 ```text
 P != 0
 ```
 
-A later statistics request returns:
+A later statistics sample returns:
 
 ```text
 C > P
 ```
 
-The host calculates:
+and the host performs:
 
 ```text
 delta = C - P
 R = 600 / delta
-```
-
-and then updates:
-
-```text
 P = C
 ```
 
@@ -426,31 +389,30 @@ Conceptually:
 ```text
 sample 1
 C = 1000
-      |
-      v
+    |
+    v
 P = 1000
-      |
-      | valid measurement interval
-      v
+    |
+    | valid measurement interval
+    v
 sample 2
 C = 1030
-      |
-      v
+    |
+    v
 delta = 30
-      |
-      v
+    |
+    v
 fresh R
-      |
-      v
+    |
+    v
 P = 1030
 ```
 
-This provides a sequence of comparable measurements as long as the baseline
-remains valid.
+This produces comparable measurements as long as the baseline remains valid.
 
 ---
 
-## Baseline Establishment
+# 9. Baseline Establishment
 
 When:
 
@@ -458,8 +420,7 @@ When:
 P == 0
 ```
 
-there is no previous cumulative sample from which a new delta can be
-calculated.
+there is no previous cumulative sample.
 
 The host therefore installs:
 
@@ -477,23 +438,23 @@ No fresh:
 
 measurement exists on that pass.
 
-This is fundamental to understanding the later recovery loop:
+This gives an important invariant:
 
-> A baseline-only sample cannot provide new `real_beacon_skip` evidence.
+> A baseline-only sample cannot produce fresh `real_beacon_skip` evidence.
 
-A valid new measurement requires another later sample.
+A later comparable sample is required.
 
 ---
 
-## Counter Reset or Decrease
+# 10. Counter Reset or Decrease
 
-The firmware also handles:
+The firmware handles:
 
 ```text
 C <= P
 ```
 
-without performing an unsigned subtraction that could underflow.
+without performing an invalid unsigned subtraction.
 
 The relevant state is reset approximately as:
 
@@ -502,31 +463,28 @@ R = 0
 P = C
 ```
 
-This handles cases where the cumulative counter has reset, decreased, or
-otherwise can no longer be compared normally with the previous baseline.
+This covers cumulative counter reset, decrease or another condition that makes the old baseline incomparable.
 
 ---
 
-## Statistics Acquisition Failure
+# 11. Statistics Acquisition Failure
 
-If command `0x66` fails, stock firmware clears both:
+If command `0x66` fails, stock firmware clears approximately:
 
 ```text
 P = 0
 R = 0
 ```
 
-The next successful statistics request must therefore establish a new baseline
-before another fresh ratio can be calculated.
+The next successful request must therefore establish a new baseline before another fresh ratio can be calculated.
 
-This is different from the Beacon Recovery path discussed below, where `P` is
-cleared but `R` is retained.
+This differs from the stock Beacon Recovery path, where `P` is cleared but `R` is retained.
 
-That difference is important.
+That asymmetry is central to C2.
 
 ---
 
-## C1a — Signed Interpretation of `R`
+# 12. C1a — Signed Interpretation of `R`
 
 The quotient:
 
@@ -536,9 +494,7 @@ The quotient:
 
 is stored in an 8-bit field.
 
-The stock recovery predicate later interprets this byte as a signed value.
-
-This changes the set of values that qualify for recovery.
+The stock Recovery predicate later interprets that byte as signed.
 
 For example:
 
@@ -547,10 +503,10 @@ delta = 3
 
 600 / 3 = 200
 
-uint8_t:
+uint8:
 0xC8
 
-signed int8:
+int8:
 -56
 ```
 
@@ -561,19 +517,18 @@ delta = 4
 
 600 / 4 = 150
 
-uint8_t:
+uint8:
 0x96
 
-signed int8:
+int8:
 -106
 ```
 
 The stock predicate rejects zero and accepts values less than or equal to `2`.
 
-As a result, these negative signed interpretations unexpectedly satisfy the
-predicate.
+The negative signed representations therefore unexpectedly satisfy the predicate.
 
-The fresh stock trigger set becomes:
+The fresh stock trigger set includes:
 
 ```text
 delta = 3
@@ -581,23 +536,15 @@ delta = 4
 delta = 201 .. 600
 ```
 
-The `delta = 3` and `delta = 4` cases are therefore created by the signed
-interpretation of the stored byte.
+The `delta = 3` and `delta = 4` cases arise from host-side signed interpretation.
 
-They are not evidence that the WF200 reported a negative or otherwise invalid
-beacon count.
+They are not evidence that the WF200 produced negative counters.
 
-Patch C-C changes the control interpretation to unsigned while preserving the
-diagnostic byte.
-
-See [`real-beacon-skip.md`](real-beacon-skip.md) for the complete arithmetic
-analysis.
+C-C changes the control interpretation while preserving the diagnostic byte.
 
 ---
 
-## C1b — Measurement-Window Validity
-
-The second problem concerns the age of `P`.
+# 13. C1b — Measurement-Window Validity
 
 The formula:
 
@@ -605,65 +552,59 @@ The formula:
 600 / (C - P)
 ```
 
-only has the intended meaning if `P` and `C` delimit the measurement interval
-assumed by the constant `600`.
+has the intended meaning only if `P` and `C` delimit the measurement interval assumed by the fixed numerator.
 
-Stock firmware does not attach an elapsed-time value to `P`.
+Stock firmware does not attach elapsed-time validity to `P`.
 
-More importantly, firmware paths exist where an expected measurement
-opportunity is skipped while the old baseline survives.
+More importantly, paths exist where an expected measurement opportunity can be skipped while the baseline survives.
 
 Conceptually:
 
 ```text
 P established
-      |
-      v
-expected measurement opportunity skipped
-      |
-      v
+     |
+     v
+expected measurement skipped
+     |
+     v
 P retained
-      |
-      v
+     |
+     v
 another opportunity skipped
-      |
-      v
+     |
+     v
 P retained
-      |
-      v
+     |
+     v
 later C
-      |
-      v
+     |
+     v
 600 / (C - P)
 ```
 
-The later counter delta can therefore span a longer logical interval than the
-fixed numerator assumes.
+The later delta can therefore span a longer logical interval than the fixed numerator assumes.
 
-This does not require the WF200 counter to be wrong.
-
-The failure can occur with two completely correct cumulative counter values:
+Two correct cumulative counter values can therefore produce an invalid host-derived result:
 
 ```text
-correct old cumulative value P
-              +
-correct later cumulative value C
-              +
-wrong assumption about elapsed measurement window
-              =
-invalid host-side derived value
+correct old P
+    +
+correct later C
+    +
+invalid assumption about measurement interval
+    =
+invalid derived value
 ```
 
-This is why reconstructing every internal detail of the protected WF200
-counter is not required to identify the host-side baseline-validity problem.
+This is C1b.
 
 ---
 
-## C2 — Historical `R` Reused as Current Control Evidence
+# 14. C2 — Historical `R` Reused as Fresh Evidence
 
-The third problem occurs after Beacon Recovery.
+The third defect occurs after Beacon Recovery.
 
-Stock recovery clears:
+Stock Recovery clears:
 
 ```text
 P
@@ -675,96 +616,112 @@ but retains:
 R
 ```
 
-After a qualifying recovery the state can therefore become:
+The post-Recovery state can therefore become:
 
 ```text
 P = 0
 R = historical qualifying value
 ```
 
-At the next successful `0x66` request, the firmware can only establish:
+At the next successful `0x66` request, firmware can only establish:
 
 ```text
 P = C
 ```
 
-because no previous baseline exists.
+No fresh `R` can be calculated.
 
-No fresh `R` is calculated on that pass.
+However, the stock control flow subsequently evaluates the retained historical `R`.
 
-However, the stock control flow subsequently evaluates the retained historical
-`R`.
-
-If it still satisfies the recovery predicate, another recovery occurs and `P`
-is cleared again.
+If it still satisfies the Recovery predicate, another Recovery can occur and `P` is cleared again.
 
 Conceptually:
 
 ```text
 fresh qualifying R
-      |
-      v
+     |
+     v
 Beacon Recovery
-      |
-      +---- P = 0
-      |
-      +---- R retained
-      |
-      v
+     |
+     +---- P = 0
+     |
+     +---- R retained
+     |
+     v
 next successful 0x66
-      |
-      v
+     |
+     v
 P == 0
-      |
-      v
+     |
+     v
 P = C
-      |
-      | no fresh R calculated
-      v
+     |
+     | no fresh R calculated
+     v
 historical R evaluated
-      |
-      v
-Beacon Recovery again
-      |
-      v
+     |
+     v
+Recovery can recur
+     |
+     v
 P = 0
 ```
 
-The newly established baseline never survives long enough to reach the next
-comparable sample.
+The defect is not merely retaining `R`.
 
-This produces the self-sustaining recovery behavior observed on affected stock
-2.2.4 devices.
+Retaining a diagnostic value can be legitimate.
 
-The important distinction is not simply that `R` is retained.
-
-Retaining the most recent diagnostic value can be perfectly reasonable.
-
-The defect is that:
+The defect is:
 
 ```text
 historical diagnostic value
 ```
 
-is subsequently treated as:
+being reused as:
 
 ```text
 fresh control evidence
 ```
 
-on a pass where no fresh measurement was made.
+on a pass where no fresh estimator result exists.
 
 ---
 
-## Why the WF200 Counter Does Not Need to Be Faulty
+# 15. C2 Is Metastable
 
-Earlier stages of this investigation placed considerable emphasis on
-determining exactly how the protected WF200 firmware counts received and missed
-beacons.
+Earlier project documentation often described C2 as:
 
-That remains useful for understanding the original design.
+```text
+self-sustaining
+```
 
-It is no longer necessary for establishing C1a, C1b or C2.
+or effectively:
+
+```text
+Recovery forever until reboot
+```
+
+That wording is too strong.
+
+The demonstrated behavior is better described as:
+
+```text
+metastable stale-evidence recurrence
+```
+
+It can produce long-lived, approximately minute-spaced Recovery behavior.
+
+However, it is not proven to be mathematically permanent.
+
+Firmware can leave the recurrence without reboot.
+
+Therefore the correct statement is:
+
+> C2 can repeatedly reuse stale qualifying evidence for extended periods, but the state is not guaranteed to persist forever.
+
+---
+
+# 16. Why the WF200 Counter Does Not Need to Be Faulty
 
 Assume:
 
@@ -774,38 +731,47 @@ WF200 cumulative received-beacon counter
 completely correct
 ```
 
-C1a can still occur because the host interprets the resulting 8-bit quotient
-as signed.
+C1a can still occur because the host interprets the derived byte incorrectly.
 
-C1b can still occur because the host can compare correct cumulative values
-across an invalid measurement window.
+C1b can still occur because correct cumulative samples can span an invalid measurement epoch.
 
-C2 can still occur because the host can reuse an old derived value after
-clearing the baseline from which that value was originally calculated.
+C2 can still occur because the host reuses a historical derived value after clearing its measurement baseline.
 
-These are independent host-side properties.
+Therefore:
+
+```text
+WF200 counter correct
+```
+
+does not imply:
+
+```text
+host Recovery logic correct
+```
+
+These are separate layers.
 
 ---
 
-## `desired_beacon_skip` and `real_beacon_skip`
+# 17. `desired_beacon_skip` vs. `real_beacon_skip`
 
-The firmware contains two values that are easy to confuse.
+The firmware contains two values that are easily confused.
 
-The requested WLAN power-save parameter is:
+Requested WLAN policy:
 
 ```text
 desired_beacon_skip
 ```
 
-The counter-derived value is:
+Counter-derived estimate:
 
 ```text
 real_beacon_skip
 ```
 
-They do not represent the same thing.
+They are not the same quantity.
 
-The normal desired skip is selected according to RSSI:
+The normal desired skip is selected from RSSI approximately as:
 
 | RSSI | `desired_beacon_skip` |
 |---|---:|
@@ -813,27 +779,20 @@ The normal desired skip is selected according to RSSI:
 | -79 to -70 dBm | 15 |
 | < -79 dBm | 10 |
 
-This value is passed into the WLAN power-management configuration.
-
 `real_beacon_skip`, by contrast, is derived from:
 
 ```text
 600 / (C - P)
 ```
 
-It is therefore an estimate derived by the host from WF200 statistics.
-
-It is not a direct readback of the programmed WF200 beacon-skip setting.
-
-Consequently:
+Therefore:
 
 ```text
 desired_beacon_skip = 20
 real_beacon_skip    = 1
 ```
 
-does not by itself prove that the WF200 was physically waking for every
-beacon.
+does not prove the WF200 was physically waking for every beacon.
 
 Likewise:
 
@@ -842,17 +801,13 @@ desired_beacon_skip = 15
 real_beacon_skip    = 12
 ```
 
-does not mean that the radio was simply configured for a skip of 12.
-
-The two values come from different mechanisms.
+does not mean the radio was simply configured for skip 12.
 
 ---
 
-## Runtime Behavior
+# 18. Stock 2.2.4 Runtime Behavior
 
-### Stock 2.2.4
-
-Stock 2.2.4 devices have repeatedly shown the characteristic recovery sequence:
+Affected stock 2.2.4 devices have shown the characteristic sequence:
 
 ```text
 Beacon skip error!
@@ -862,217 +817,240 @@ PS state 1
 PS state 3
 ```
 
-On affected devices this can repeat roughly once per minute.
+with periods close to once per minute.
 
-A stock 2.2.4 reference device has shown recurring recovery even with
-relatively good RSSI and:
+This has occurred even with relatively good RSSI and:
 
 ```text
 desired_beacon_skip = 20
 ```
 
-This demonstrates that poor RSSI is not required for the stock recurring loop.
+Poor RSSI is therefore not required for stock recurring Recovery.
 
 ---
 
-### Runtime Behavior with mDNS Suppressed
+# 19. Historical Patch B Result
 
-Patch B suppresses the identified recurring connected-maintenance mDNS restart
-while retaining the stock beacon statistics and Beacon Recovery path.
-
-It retains:
+Patch B suppresses the targeted periodic mDNS maintenance behavior while retaining:
 
 ```text
 command 0x66
-received-beacon statistics
+beacon statistics
 baseline handling
 real_beacon_skip
 stock Beacon Recovery
 ```
 
-Long-term testing showed that recurring Beacon Recovery continued on this
-configuration.
+Long-term testing showed that recurring Recovery continued.
 
-The Patch-B device eventually reached a recovery rate of approximately:
+The historical `.77` experiment reached approximately:
 
 ```text
-58 recoveries/hour
+~58 Recoveries/hour
 ```
 
-during its full-discharge run.
+during the full-discharge run.
 
-This demonstrates that the periodic mDNS restart is not required for the
-observed recurring Beacon Recovery behavior.
+Therefore the targeted periodic mDNS mechanism is not required for the observed stock Recovery recurrence.
 
-It does not establish that network traffic in general is irrelevant to WF200
-timing or power-save behavior.
+This does not establish that all network activity is irrelevant.
 
 ---
 
-### D3 Power-Save Errors
+# 20. Historical D3 Observer
 
-Firmware 2.2.4 contains handling for a WF200 `PS_MODE_ERROR` indication.
-
-A dedicated D3 observer build was used to count these indications and record
-their reason values.
-
-On the D3 observer device, recurring Beacon Recovery continued for days while:
+Firmware 2.2.4 contains handling for a WF200:
 
 ```text
-D3_total = 0
+PS_MODE_ERROR
 ```
 
-At approximately 63.9 hours of uptime the same device had accumulated roughly:
+indication.
+
+A dedicated D3 observer build counted those events while retaining stock Recovery.
+
+A long historical observation reached approximately:
 
 ```text
-beacon_err = 3835
-D3_total   = 0
+uptime      ~63.9 h
+beacon_err  3835
+D3_total    0
 ```
 
-This is important because it separates the known host Beacon Recovery trigger
-from the observed WF200 D3 error indication.
-
-The available runtime evidence therefore does not support:
+Thus:
 
 ```text
-D3 PS_MODE_ERROR
-        |
-        v
-Beacon Recovery
+3835 Beacon Recoveries
+0 D3 PS_MODE_ERROR
 ```
 
-as a required trigger relationship.
+were observed.
 
-A radio-internal condition that does not generate D3 could still affect the
-beacon statistics, so this result does not establish that WF200 behavior is
-irrelevant.
+This separates the Shelly host Recovery heuristic from the known D3 error channel.
 
-It establishes only that the observed recurring Beacon Recovery does not
-require a host-visible D3 event.
+It does not prove that no other radio-side PM issue existed.
 
 ---
 
-### Runtime Behavior with Patch C-C
+# 21. C-C
 
-Patch C-C was designed to correct the three host-side validity problems while
-preserving legitimate fresh Beacon Recovery.
-
-It keeps:
+C-C corrects:
 
 ```text
-WF200 command 0x66
+C1a
+C1b
+C2
+```
+
+while retaining the underlying statistics path.
+
+It preserves:
+
+```text
+command 0x66
 cumulative beacon statistics
 real_beacon_skip diagnostic value
-legitimate fresh recovery
+fresh valid Recovery
 ```
 
 while changing the control logic so that:
 
-- `R` is interpreted correctly for the recovery decision
-- stale measurement epochs invalidate `P`
-- a baseline-only sample cannot reuse historical `R` as fresh evidence
-- a newly established baseline can survive until another comparable sample is
-  available
+- `R` is interpreted correctly
+- stale measurement epochs invalidate the baseline
+- baseline-only samples cannot reuse historical `R`
+- a newly established baseline can survive until another comparable sample
+- only fresh valid evidence can produce a new Recovery decision
 
-The intended progression is:
+---
+
+# 22. C-C Progression
+
+The intended corrected progression is:
 
 ```text
 invalid measurement epoch
-      |
-      v
+     |
+     v
 P invalidated
-      |
-      v
+     |
+     v
 next successful sample
-      |
-      v
+     |
+     v
 establish P only
-      |
-      v
+     |
+     v
 next valid comparable sample
-      |
-      v
+     |
+     v
 calculate fresh R
-      |
-      +---- non-qualifying -> continue normally
-      |
-      +---- qualifying ----> Beacon Recovery
+     |
+     +---- non-qualifying -> continue normally
+     |
+     +---- qualifying ----> Recovery
 ```
 
-Static analysis and controlled hardware testing confirmed that C-C removes the
-self-sustaining stale-`R` recovery mechanism without eliminating all Beacon
-Recovery.
-
-This distinction became important during later testing.
-
-Devices running C-C can still produce fresh qualifying recovery events.
-
-Observed rates on later C-C-based configurations have been much lower than the
-approximately once-per-minute stale loop, but fresh recovery has not
-disappeared.
-
-This means there are two different phenomena:
-
-```text
-stock stale-state recovery loop
-```
-
-and:
-
-```text
-fresh qualifying recovery
-```
-
-Patch C-C addresses the first.
-
-It deliberately does not suppress the second.
+C-C therefore corrects the stale-evidence recurrence without globally disabling Recovery.
 
 ---
 
-### C-C with WF200 3.18.0
+# 23. C-C Runtime Result
 
-Later test configurations combined the corrected C-C host logic with WF200
-3.18.0.
+Controlled hardware testing confirmed that C-C removes the demonstrated invalid stale-evidence recurrence.
 
-WF200 3.18.0 includes a Silicon Labs change concerning a device not sleeping
-after a power-save mode change.
+Fresh qualifying Recovery still occurs.
 
-The newer radio firmware initializes and operates successfully with the Shelly
-2.2.4 FMAC 3.7.0 host environment used in the test builds.
-
-Fresh Beacon Recovery still occurs with C-C and WF200 3.18.0.
-
-On the A1+C-C+WF200 3.18.0 test device, for example, approximately:
+Historical C-C-based configurations produced approximately:
 
 ```text
-27 - 28 fresh recoveries/hour
+27–30 fresh Recoveries/hour
 ```
 
-were observed during the first day.
+during some periods.
 
-The device also showed states such as:
+These are specific measurements.
+
+They are not a universal C-C rate or guaranteed maximum.
+
+The important distinction is:
 
 ```text
-desired_beacon_skip = 20
-real_beacon_skip    = 1
+stock stale-evidence recurrence
 ```
 
-despite good RSSI.
+versus:
 
-Because C-C prevents the known stale-`R` self-sustaining loop, these remaining
-events cannot simply be classified as repetitions of C2.
+```text
+fresh qualifying Recovery
+```
 
-They represent fresh measurements that satisfy the retained recovery
-condition.
+C-C addresses the first.
 
-The exact radio/environmental condition producing those fresh measurements
-remains under investigation.
+It deliberately retains the second.
 
 ---
 
-## AP Selection and RSSI
+# 24. Historical C-C + WF200 3.18.0
 
-The analyzed host connection path uses approximately:
+Later historical configurations combined:
+
+```text
+C-C
++
+WF200 3.18.0
+```
+
+The newer official WF200 firmware successfully initialized and operated with Shelly FMAC 3.7.0.
+
+Fresh Recovery remained observable.
+
+A historical integrated A1+C-C+WF200 3.18.0 device showed approximately:
+
+```text
+27–28 fresh Recoveries/hour
+```
+
+during some intervals.
+
+Because C-C was active, those events cannot simply be classified as C2 stale-evidence repetitions.
+
+They resulted from later fresh estimator measurements satisfying the retained Recovery predicate.
+
+---
+
+# 25. Historical A1 Build Identity
+
+The historical integrated build:
+
+```text
+A1
++
+C-C
++
+WF200 3.18.0
+```
+
+was an important hardware experiment.
+
+Its measurements remain valid.
+
+However, it is no longer the current corrected baseline.
+
+Historical results from that build must not be relabeled as:
+
+```text
+A1R
+B2.1
+B2.1_OBS
+```
+
+The A1 regression discovered later was an experimental patch defect, not a stock Shelly defect.
+
+---
+
+# 26. AP Selection and RSSI
+
+The analyzed connection path uses approximately:
 
 ```text
 wildcard BSSID
@@ -1080,104 +1058,74 @@ channel = 0
 prevent_roaming = 1
 ```
 
-The host does not implement a normal background policy that continuously
-switches to a stronger BSSID.
+The host does not implement an identified background strongest-BSSID roaming policy.
 
-Association with a less favorable access point can plausibly affect:
+Association with a less favorable AP can plausibly affect:
 
 - beacon reception
 - WLAN timing
 - retransmissions
 - power-save behavior
 
-However, the current evidence does not establish AP selection as the direct
-cause of a qualifying `real_beacon_skip` measurement.
+However, current evidence does not establish AP selection as the direct cause of fresh low `real_beacon_skip`.
 
-Recurring recovery has been observed under different RSSI conditions and
-different requested skip regimes.
+Fresh Recovery has been observed at good RSSI.
 
-Testing with FRITZ! Mesh/Band Steering disabled also did not eliminate fresh
-recovery on the A1+C-C+WF200 3.18.0 test device.
+Historical testing with FRITZ! Mesh/Band Steering disabled also did not eliminate fresh Recovery on the historical integrated `.234` experiment.
 
-AP behavior therefore remains relevant environmental context rather than an
-established explanation for the counter behavior.
-
-See:
-
-[`ap-selection-and-roaming.md`](ap-selection-and-roaming.md)
+AP behavior therefore remains environmental context, not a proven counter root cause.
 
 ---
 
-## What `real_beacon_skip` Actually Tells Us
+# 27. What `real_beacon_skip` Actually Tells Us
 
-The name can easily suggest that the value directly reports what the WF200 is
-doing.
+The name can suggest that `real_beacon_skip` directly reports radio behavior.
 
-The implementation does not support that interpretation.
+It does not.
 
-What the host actually knows is:
+The host knows:
 
 ```text
-previous cumulative received count P
-current cumulative received count C
+previous cumulative count P
+current cumulative count C
 ```
 
-and from those values it calculates:
+and derives:
 
 ```text
 R = uint8_t(600 / (C - P))
 ```
 
-Therefore `R` is best understood as:
+The best supported interpretation is:
 
-> a host-derived value based on the number of received beacons observed by the
-> WF200 across an assumed measurement interval.
+> A host-derived value based on received-beacon statistics across an assumed valid measurement interval.
 
-It is not a direct measurement of:
+It is not direct telemetry for:
 
 - WF200 sleep residency
-- actual radio wake frequency
+- physical radio wake frequency
 - programmed beacon skip
 - missed RF frames
 - DTIM behavior
-- physical current consumption
-
-This distinction is important when interpreting `/stats`.
-
-A value such as:
-
-```text
-desired_beacon_skip = 20
-real_beacon_skip    = 1
-```
-
-is evidence that the host calculation produced `1`.
-
-It does not by itself prove:
-
-```text
-WF200 woke for every beacon
-```
-
-Additional radio-side evidence would be required for that conclusion.
+- current consumption
 
 ---
 
-## What the Beacon Counters Do Not Prove
+# 28. What the Beacon Counters Do Not Prove
 
-The available statistics do not by themselves tell us:
+The available statistics do not directly reveal:
 
-- how many beacon opportunities the AP generated
-- how many beacon opportunities the WF200 deliberately skipped
-- how many frames were lost because of RF conditions
+- total beacon opportunities generated by the AP
+- beacon opportunities intentionally skipped by the radio
+- exact RF-loss count
 - exact physical time represented by `C - P`
-- exact DTIM interaction
-- actual WF200 sleep residency
+- DTIM interaction
+- WF200 sleep residency
 - host MCU sleep residency
-- whether PA8 prevented host sleep
-- whether a particular recovery event caused measurable battery drain
+- PA8 sleep-veto duty
+- energy consumed by one Recovery
 
-Likewise:
+Therefore:
 
 ```text
 real_beacon_skip <= 2
@@ -1189,108 +1137,555 @@ does not automatically mean:
 RF failure
 ```
 
-because the value must first be interpreted in the context of the host-side
-measurement lifecycle.
+The estimator must be interpreted together with its measurement lifecycle.
 
 ---
 
-## Battery-Drain Relevance
+# 29. Battery-Drain Relevance
 
-The received-beacon counter itself consumes no meaningful battery simply by
-existing as a statistic.
+The received-beacon counter itself is only a statistic.
 
-Its relevance comes from what the host does with the derived value:
+Its relevance arises from the host reaction:
 
 ```text
 WF200 statistics
-      |
-      v
+     |
+     v
 received-beacon counter
-      |
-      v
+     |
+     v
 host calculation
-      |
-      v
+     |
+     v
 real_beacon_skip
-      |
-      v
-Beacon Recovery
-      |
-      v
-temporary active WLAN configuration
-      |
-      v
-additional power-management activity
+     |
+     v
+Recovery decision
+     |
+     v
+temporary more-active WLAN PM state
+     |
+     v
+additional PM activity
 ```
 
-Stock 2.2.4 can turn one qualifying measurement into a recurring recovery loop
-through the C2 stale-state defect.
+Stock C2 can turn one qualifying measurement into repeated stale-evidence Recovery.
 
-That clearly creates unnecessary WLAN power-management activity.
+This creates unnecessary PM work.
 
-However, the project has not established that this mechanism alone explains
-the historical TRV battery-drain problem.
+However, the project has not established that this mechanism alone explains historical TRV battery drain.
 
-There are several reasons for keeping those questions separate.
+---
 
-First, battery drain also occurred on firmware versions older than 2.2.4.
+# 30. Recovery Occupancy Is Not Energy
 
-Second, C-C removes the known self-sustaining recovery loop but does not remove
-all fresh recovery.
+Historical stock behavior around:
 
-Third, later host-sleep analysis identified additional independent defects in
-the EFM32GG11 power-management path.
+```text
+~60 Recoveries/hour
+```
 
-In particular, the shared B2 sleep-blocker reference counter contains
-unserialized read-modify-write operations. Under real task preemption these can
-produce either:
+with approximately:
+
+```text
+~5 serviced seconds/Recovery
+```
+
+corresponds to roughly:
+
+```text
+~300 s/hour
+~5 min/hour
+~8.33% wall-clock occupancy
+```
+
+Historical C-C intervals around:
+
+```text
+27–30/hour
+```
+
+correspond to approximately:
+
+```text
+~135–150 s/hour
+~2.25–2.5 min/hour
+```
+
+These are wall-clock figures.
+
+They are not battery-consumption percentages.
+
+No direct synchronized current measurement exists for these events.
+
+---
+
+# 31. Host PM Defects Are Separate
+
+Later reverse engineering demonstrated additional host-side defects independent of the Beacon RX arithmetic.
+
+These include PM lifecycle issues addressed by A1/A1R and the B2 reference-counter race.
+
+The Beacon RX path therefore represents only one part of the battery-drain investigation.
+
+---
+
+# 32. A1R
+
+A1R supersedes historical A1.
+
+A1R retains the lifecycle corrections while fixing the experimental regression affecting verified temporary `request1` override paths.
+
+Qualification:
+
+```text
+151 / 151
+```
+
+native behavior tests passed.
+
+A1R is part of:
+
+```text
+B2.1
+B2.1_OBS
+B2.2
+```
+
+---
+
+# 33. B2 Serialization
+
+The B2 host sleep-blocker reference counter contains a demonstrated preemption/lost-update race.
+
+Possible consequences include:
 
 ```text
 phantom B2 contribution
-      |
-      v
+        |
+        v
 EM2 incorrectly blocked
-      |
-      v
-host limited to EM1
+        |
+        v
+host restricted to EM1
 ```
 
 or:
 
 ```text
 lost B2 contribution
-      |
-      v
-EM2 incorrectly allowed while an owner still requires EM1
+        |
+        v
+EM2 allowed while owner remains active
 ```
 
-This is independent of the Beacon RX calculation.
+The correction uses bounded serialization of the relevant complete B2 read-modify-write operations.
 
-A separate PA8 WLAN host-notification input can also veto WFI completely while
-asserted.
-
-These findings are now being investigated with dedicated host-sleep
-instrumentation.
-
-The Beacon Recovery mechanism should therefore be treated as one confirmed
-firmware problem inside a larger battery-drain investigation, not as the final
-root-cause explanation.
-
-See:
-
-[`power-management-and-sleep.md`](power-management-and-sleep.md)
+It preserves reference-count semantics.
 
 ---
 
-## Patch Relationship
+# 34. Current Observer-Free Baseline
 
-The project has used several patches for different experimental purposes.
+The current corrected observer-free baseline is:
 
-### Patch A
+```text
+B2.1
+```
 
-Patch A bypasses the Beacon Recovery action.
+containing:
 
-It does not remove:
+```text
+A1R
++
+C-C
++
+B2 bounded serialization
++
+minimal MQTT PUBLISH guard
++
+WF200 3.18.0
+```
+
+This supersedes the historical:
+
+```text
+A1 + C-C + WF200 3.18.0
+```
+
+platform as the current corrected baseline.
+
+---
+
+# 35. Current PM52→cmd66 Observer
+
+The earlier proposed clean-stock Host Observer is no longer the active diagnostic design.
+
+The current observer is:
+
+```text
+PM52 -> cmd66 observer
+```
+
+integrated into:
+
+```text
+B2.1_OBS
+```
+
+It records:
+
+- actual PM52 payloads
+- native PM52 results
+- A1R completion decisions
+- existing cmd66 requests
+- existing cmd66 results
+- fresh estimator operands
+- connection epochs
+- recent-event history
+- first-fault state
+
+This directly connects the host PM request path with the same command-0x66 statistics path documented here.
+
+---
+
+# 36. No Additional Command `0x66`
+
+A critical observer requirement is:
+
+> The observer must not generate an additional WF200 statistics request.
+
+The native firmware already issues command `0x66`.
+
+The observer records those existing transactions.
+
+Therefore:
+
+```text
+observer-added cmd66 requests = 0
+```
+
+This avoids creating new radio activity simply to observe the counter path.
+
+---
+
+# 37. Observer Noninterference Design
+
+The current observer adds no:
+
+```text
+new timer
+new task
+new queue
+automatic network traffic
+flash write
+PM policy change
+additional WF200 request
+```
+
+Observer data are retrieved only through explicit status access.
+
+Software-level noninterference has been qualified.
+
+Absolute physical timing noninterference is not claimed.
+
+---
+
+# 38. Fresh Estimator Operands
+
+The observer records the operands relevant to fresh `real_beacon_skip` calculation.
+
+This allows a later fault to distinguish:
+
+```text
+historical cached R
+```
+
+from:
+
+```text
+freshly calculated R
+```
+
+which is particularly important for C2 analysis.
+
+A future drain event can therefore be correlated with the actual estimator state rather than only the public cached value.
+
+---
+
+# 39. Connection Epochs
+
+Counter/baseline state can become misleading if values from different WLAN connection lifetimes are combined.
+
+The observer therefore tracks:
+
+```text
+connection epoch
+```
+
+This helps distinguish:
+
+```text
+same connection
+```
+
+from:
+
+```text
+reconnect / new association context
+```
+
+when interpreting `P`, `C`, PM52 and cmd66 history.
+
+---
+
+# 40. B2.1_OBS
+
+The active long-term diagnostic build is:
+
+```text
+B2.1_OBS
+```
+
+defined as:
+
+```text
+B2.1
++
+PM52 -> cmd66 observer
+```
+
+Research identity:
+
+```text
+research_build: B2.1_OBS
+```
+
+Readout identifier:
+
+```text
+pm52_cmd66
+```
+
+The native Shelly version remains 2.2.4.
+
+---
+
+# 41. B2.1_OBS Qualification
+
+Qualification includes:
+
+```text
+A1R:
+151 / 151
+
+observer/readout:
+356 / 356
+
+B2:
+2060 + 102
+plus mixed/preemption qualification
+
+MQTT:
+258
+
+plus:
+C-C qualification
+decoder regression
+deterministic construction
+GBL/CRC/geometry verification
+zero unexplained changes
+```
+
+Disposition:
+
+```text
+B2.1_OBS RELEASE-CANDIDATE GO
+```
+
+This means qualified for the current controlled long-term hardware experiment.
+
+It does not mean production firmware.
+
+---
+
+# 42. Current Hardware Population
+
+The active hardware population is:
+
+```text
+.77  -> B2.1_OBS
+.88  -> B2.1_OBS
+.11  -> B2.1_OBS
+.71  -> B2.1_OBS
+.234 -> B2.1_OBS
+.61  -> B2.1_OBS
+
+.97  -> stock 2.2.4 control
+```
+
+or:
+
+```text
+6 × B2.1_OBS
+1 × stock 2.2.4
+```
+
+The old `.234` A1 integrated canary is therefore historical, not the current test platform.
+
+---
+
+# 43. Early Current Observation
+
+During the initial B2.1_OBS observation period:
+
+```text
+beacon_err = 0
+```
+
+on the corrected devices during the first observed interval.
+
+The stock `.97` control had accumulated thousands of Beacon Recovery events and showed periods of approximately minute-scale recurrence.
+
+Other stock intervals were quieter.
+
+This is preliminary runtime evidence only.
+
+It is not a battery-lifetime result.
+
+---
+
+# 44. Current Experimental Decision
+
+The current decision is:
+
+```text
+WAIT
+OBSERVE
+COLLECT VOLTAGE/RUNTIME DATA
+DO NOT CHANGE TEST VARIABLES
+```
+
+Therefore the project is not currently:
+
+- changing command-0x66 cadence
+- changing the estimator formula
+- changing C-C
+- disabling fresh Recovery
+- adding Recovery rate limiting
+- changing WF200 firmware
+- flashing B2.2 onto the active population
+
+The value of the current experiment depends on continuity.
+
+---
+
+# 45. If a B2.1_OBS Device Drains
+
+If genuine rapid drain develops:
+
+```text
+abnormal voltage/runtime behavior
+        |
+        v
+preserve first-fault observer state
+        |
+        v
+inspect PM52 history
+        |
+        v
+inspect cmd66 history
+        |
+        v
+inspect C / P / fresh R context
+        |
+        v
+inspect connection epoch
+        |
+        v
+resume targeted RE
+```
+
+This is the current reason for retaining the observer.
+
+---
+
+# 46. If B2.1_OBS Remains Stable
+
+If long-term corrected devices remain stable:
+
+```text
+remove observer
+        |
+        v
+requalify observer-free build
+        |
+        v
+hardware regression
+        |
+        v
+evaluate final firmware candidate
+```
+
+The observer is instrumentation, not automatically a final production component.
+
+---
+
+# 47. B2.2
+
+B2.2 is a later observer-free candidate containing exactly nine selected qualified corrections:
+
+```text
+1. A1R including A1 lifecycle correction
+2. C-C
+3. B2 serialization
+4. minimal MQTT PUBLISH guard
+5. official WF200 3.18.0
+6. Calibration Restore Guard
+7. P01 PA3 release
+8. P02 I2C timeout retirement
+9. P03 GPIO interrupt-mask correction
+```
+
+Its status is:
+
+```text
+B2.2 OFFLINE RELEASE-CANDIDATE GO
+```
+
+B2.2 does not contain the PM52→cmd66 observer.
+
+No physical B2.2 hardware qualification has yet been performed.
+
+---
+
+# 48. Why B2.2 Does Not Change This Counter Model
+
+B2.2 retains C-C and the existing command-0x66 statistics architecture.
+
+It does not redefine the underlying WF200 beacon-counter semantics.
+
+Therefore the host model documented here remains relevant to:
+
+```text
+B2.1
+B2.1_OBS
+B2.2
+```
+
+with the important distinction that C-C prevents stale/invalid evidence from controlling Recovery.
+
+---
+
+# 49. Historical Patch Relationship
+
+Several historical patches had different purposes.
+
+## Patch A
+
+Patch A bypassed the Beacon Recovery action.
+
+It retained:
 
 ```text
 command 0x66
@@ -1301,71 +1696,57 @@ real_beacon_skip
 desired_beacon_skip
 ```
 
-It was primarily useful as an isolation experiment.
+It was primarily a mechanism-isolation experiment.
 
-### Patch B
-
-Patch B suppresses the identified periodic mDNS maintenance restart while
-leaving the Beacon Recovery path intact.
-
-Long-term testing demonstrated that recurring stock Beacon Recovery continued
-without that periodic mDNS path.
-
-### Patch C-C
-
-Patch C-C corrects the identified host-side Beacon Recovery validity defects
-while retaining fresh recovery.
-
-It addresses:
-
-```text
-C1a
-signed control interpretation
-
-C1b
-invalid measurement epochs
-
-C2
-historical R reused as fresh evidence
-```
-
-It does not attempt to redefine the internal WF200 beacon counters.
-
-It also does not suppress a genuinely fresh measurement merely because the
-result is unusual.
-
-### A1
-
-A1 addresses a separate set of host/WF200 power-management ownership,
-settlement and failure-path problems.
-
-A1 is not a Beacon RX counter patch.
-
-The combined experimental firmware:
-
-```text
-A1 + C-C + WF200 3.18.0
-```
-
-is useful because it combines independently identified host corrections with
-the newer radio firmware while retaining fresh Beacon Recovery for diagnostic
-purposes.
-
-It should not be interpreted as evidence that all possible battery-drain
-mechanisms have been corrected.
+Patch A is historical.
 
 ---
 
-## Remaining WF200 Questions
+## Patch B
 
-The host-side path is now sufficiently understood to identify and correct its
-known validity defects.
+Patch B suppressed the targeted periodic mDNS behavior while retaining stock Beacon Recovery.
 
-The remaining WF200 questions are narrower.
+It established that the targeted mDNS mechanism was not required for recurring stock Recovery.
 
-### Received-Beacon Semantics
+Patch B is historical.
 
-What exact internal WF200 event increments:
+---
+
+## C-C
+
+C-C corrects:
+
+```text
+C1a
+C1b
+C2
+```
+
+without suppressing valid fresh Recovery.
+
+C-C remains part of the current corrected platform.
+
+---
+
+## A1 / A1R
+
+Historical A1 addressed separate host PM lifecycle and ownership problems.
+
+A1R supersedes A1 and corrects the later-discovered experimental temporary-override regression.
+
+A1/A1R are not Beacon-counter patches.
+
+---
+
+# 50. Remaining WF200 Questions
+
+The host-side path is sufficiently understood to establish C1a/C1b/C2.
+
+Remaining radio-side questions are narrower.
+
+## Received-Beacon Semantics
+
+What exact internal event increments:
 
 ```text
 received beacon count
@@ -1373,28 +1754,27 @@ received beacon count
 
 under Fast Power Save?
 
-### Intentional Beacon Skipping
+## Intentional Beacon Skipping
 
-How are beacon opportunities that the radio intentionally sleeps through
-represented in:
+How are intentionally skipped beacon opportunities represented in:
 
 ```text
-received beacon count
-missed beacon count
+received count
+missed count
 TBTT difference
 ```
 
 ?
 
-### DTIM Interaction
+## DTIM Interaction
 
-How do DTIM interval and DTIM reception affect those statistics?
+How does DTIM behavior affect these statistics?
 
-### Power-Save Transitions
+## PM Transitions
 
 How are the counters affected by:
 
-- power-save mode changes
+- PM mode changes
 - Fast Power Save transitions
 - temporary Active mode
 - reassociation
@@ -1402,18 +1782,27 @@ How are the counters affected by:
 
 ?
 
-### Fresh Recovery Trigger
+## Fresh Trigger Meaning
 
-With the known stale-state host loop removed by C-C, what produces the
-remaining fresh qualifying measurements observed on physical devices?
+What real RF/WF200 condition, if any, produces a fresh:
 
-This is currently the most relevant open question for the beacon-counter path.
+```text
+real_beacon_skip = 1
+```
+
+or:
+
+```text
+real_beacon_skip = 2
+```
+
+on otherwise healthy connected devices?
 
 ---
 
-## Current Model
+# 51. Current Model
 
-The current understanding is:
+The current model is:
 
 ```text
 Access point / RF environment
@@ -1453,79 +1842,240 @@ C - P
 control interpretation
       |
       v
-Beacon Recovery
+fresh Recovery predicate
 ```
 
-The known host-side defects are:
+Stock defects are:
 
 ```text
 C1a
-R is stored as an 8-bit value but interpreted as signed by stock recovery
-logic.
+R is stored as 8-bit but interpreted as signed.
 
 C1b
-P can survive measurement epochs that no longer match the fixed-600
-calculation.
+P can survive a measurement epoch incompatible
+with the fixed-600 model.
 
 C2
-Recovery clears P but retains R, allowing historical R to be reused on a
-baseline-only sample.
+Recovery clears P but retains R, allowing historical
+R to be reused on a baseline-only sample.
 ```
 
-Patch C-C corrects these control-validity problems while preserving the
-underlying statistics and legitimate fresh recovery.
-
-The remaining fresh recovery events therefore provide useful evidence rather
-than being hidden by a blanket recovery bypass.
+C-C corrects these validity defects while preserving the underlying statistics path and legitimate fresh Recovery.
 
 ---
 
-## Current Conclusion
+# 52. Stock vs. Corrected Evidence Lifecycle
 
-The host-side Beacon RX measurement path in Shelly TRV Gen1 firmware 2.2.4 is
-now well understood.
+Stock:
+
+```text
+fresh R qualifies
+     |
+     v
+Recovery
+     |
+     v
+P cleared
+R retained
+     |
+     v
+baseline-only sample
+     |
+     v
+old R may be evaluated again
+```
+
+Corrected C-C:
+
+```text
+fresh R qualifies
+     |
+     v
+Recovery
+     |
+     v
+measurement epoch invalidated
+     |
+     v
+next successful sample
+establishes baseline only
+     |
+     v
+later comparable sample
+     |
+     v
+fresh R
+     |
+     v
+new Recovery decision
+```
+
+This is the core behavioral difference.
+
+---
+
+# 53. Current Battery-Relevance Interpretation
+
+The current evidence supports:
+
+```text
+C1a/C1b/C2
+=
+real host defects
+```
+
+and:
+
+```text
+C-C
+=
+corrected host evidence handling
+```
+
+It does not establish:
+
+```text
+Beacon RX defect
+=
+complete historical battery root cause
+```
+
+Battery drain was observed on firmware predating 2.2.4.
+
+Additional independent host and radio-relevant defects have also been identified.
+
+The counter path is therefore one important mechanism inside a broader low-power system.
+
+---
+
+# 54. What Has Been Established
+
+The project has established that:
+
+- command `0x66` supplies cumulative beacon statistics
+- `real_beacon_skip` is host-derived
+- `received_beacon_count` is used for the estimator
+- missed count is not part of the known formula
+- TBTT difference is not the formula timebase
+- `P == 0` means baseline establishment only
+- C1a is a host signedness defect
+- C1b is a host measurement-epoch validity defect
+- C2 reuses historical derived evidence
+- C2 can produce long-lived stale-evidence recurrence
+- C2 is metastable rather than proven permanent
+- C-C corrects C1a/C1b/C2
+- fresh Recovery remains possible after C-C
+- D3 `PS_MODE_ERROR` is not required for recurring host Recovery
+- WF200 3.18.0 does not eliminate all fresh host Recovery
+- `real_beacon_skip` is not physical sleep telemetry
+- the current observer records existing cmd66 activity without adding another WF200 request
+
+---
+
+# 55. What Has Not Been Established
+
+The project has not established:
+
+- exact protected WF200 beacon-counter semantics
+- exact treatment of all intentionally skipped beacon opportunities
+- exact DTIM influence on command-0x66 counters
+- physical WF200 wake frequency from `real_beacon_skip`
+- physical radio sleep residency from `real_beacon_skip`
+- exact energy cost of one Recovery
+- exact energy cost of command `0x66`
+- AP selection as the fresh-trigger root cause
+- fresh Recovery as necessarily harmful
+- fresh Recovery as necessarily beneficial
+- Beacon Recovery as the complete historical drain cause
+- B2.2 battery behavior
+- a final production firmware fix
+
+---
+
+# 56. Current Conclusion
+
+The host-side Beacon RX measurement path in Shelly TRV Gen1 firmware 2.2.4 is now well understood.
 
 The firmware:
 
 1. requests WF200 statistics through command `0x66`
 2. receives a cumulative received-beacon counter `C`
-3. retains a previous host-side baseline `P`
+3. retains a previous host baseline `P`
 4. calculates `C - P`
-5. divides the fixed value `600` by that delta
+5. divides `600` by that delta
 6. stores the result as the 8-bit cached value `R`
-7. uses `R` as input to the Beacon Recovery decision
+7. uses that value in Beacon Recovery control
 
-The investigation identified three independent host-side problems in this
-path:
+Three independent host defects were identified:
 
-- signed interpretation can change the recovery decision
-- the baseline can represent an invalid measurement window
-- historical recovery evidence can be reused without a fresh measurement
+```text
+C1a
+signed interpretation of R
 
-The third problem explains how stock 2.2.4 can enter a self-sustaining Beacon
-Recovery loop after a qualifying value has been produced.
+C1b
+invalid measurement epoch
 
-Patch C-C corrects these validity problems without disabling fresh recovery.
+C2
+historical R reused as fresh evidence
+```
 
-Runtime testing confirms that fresh recovery still occurs after the stale-state
-loop has been removed. This means the first qualifying measurement and the
-later self-sustaining stock loop must be treated as separate problems.
+C2 explains how stock 2.2.4 can enter long-lived stale-evidence Recovery recurrence after a qualifying measurement.
 
-The exact internal WF200 beacon-counter semantics remain useful for explaining
-the first fresh trigger, but they are not required to establish the host-side
-C1a, C1b and C2 defects.
+The state is metastable.
 
-Finally, neither the Beacon RX counter nor Beacon Recovery should currently be
-treated as the complete explanation for the historical battery drain.
+It should not be described as guaranteed to continue forever until reboot.
 
-The wider investigation has identified additional host power-management
-problems, including B2 blocker-accounting races and the PA8 WLAN sleep veto.
-A stock 2.2.4 host-sleep observer is being developed to determine whether those
-conditions occur during real battery-drain episodes.
+C-C corrects these validity problems without globally disabling fresh Recovery.
+
+Historical C-C-based experiments still showed fresh Recovery, including the old A1+C-C+WF200 3.18.0 platform.
+
+That platform is now historical.
+
+The current corrected baseline is:
+
+```text
+B2.1
+```
+
+and the active long-term diagnostic build is:
+
+```text
+B2.1_OBS
+```
+
+with:
+
+```text
+6 × B2.1_OBS
+1 × stock 2.2.4 control
+```
+
+The current PM52→cmd66 observer records the existing command-0x66 activity and fresh estimator context without issuing an additional WF200 statistics request.
+
+The previous proposed Stock Host Observer is no longer the current diagnostic path.
+
+The current project decision is:
+
+```text
+WAIT
+OBSERVE
+COLLECT VOLTAGE/RUNTIME DATA
+DO NOT CHANGE TEST VARIABLES
+```
+
+If a corrected device drains, the observer is intended to preserve the first useful PM52/cmd66 context.
+
+If the corrected population remains stable, the next stage is observer removal, requalification and observer-free hardware regression.
+
+The exact internal WF200 meaning of all beacon statistics remains an open question.
+
+It is not required, however, to establish the demonstrated host-side C1a/C1b/C2 defects.
+
+No claim is currently made that the Beacon RX mechanism alone explains the historical Shelly TRV Gen1 battery drain.
 
 ---
 
-## Related Documents
+# Related Documents
 
 Detailed `real_beacon_skip` arithmetic:
 
@@ -1547,52 +2097,90 @@ Periodic mDNS behavior:
 
 [`mdns-periodic-restart.md`](mdns-periodic-restart.md)
 
-Host power management and sleep:
+Host power management:
 
 [`power-management-and-sleep.md`](power-management-and-sleep.md)
 
+Host sleep and blocker accounting:
+
+[`host-sleep-and-blocker-accounting.md`](host-sleep-and-blocker-accounting.md)
+
+PM lifecycle and A1/A1R:
+
+[`pm-lifecycle-and-a1.md`](pm-lifecycle-and-a1.md)
+
+WF200 firmware:
+
+[`wf200-firmware.md`](wf200-firmware.md)
+
+Battery reporting:
+
+[`battery-reporting-and-shutdown.md`](battery-reporting-and-shutdown.md)
+
+Experimental device matrix:
+
+[`../testing/experimental-device-matrix.md`](../testing/experimental-device-matrix.md)
+
+Battery testing:
+
+[`../testing/battery-testing.md`](../testing/battery-testing.md)
+
+B2.1_OBS qualification:
+
+[`../qualification/b2.1-obs-qualification.md`](../qualification/b2.1-obs-qualification.md)
+
+B2.2 qualification:
+
+[`../qualification/b2.2-offline-release-candidate.md`](../qualification/b2.2-offline-release-candidate.md)
+
 ---
 
-## Research Method
+# Research Method
 
-This analysis is based on static reverse engineering of locally obtained
-Shelly TRV Gen1 firmware and runtime testing on personally owned devices.
+This analysis combines:
 
-Important control-flow conclusions were checked against native ARM Thumb
-instructions rather than relying only on decompiler output.
+- static ARM Thumb reverse engineering
+- native-instruction control-flow verification
+- runtime command-0x66 telemetry
+- long-term device observation
+- C-C correction testing
+- WF200 3.18.0 integration
+- PM52→cmd66 observer qualification
 
-The host statistics path was traced from:
+The host statistics path was traced through:
 
 ```text
 WF200 command 0x66
-```
-
-through:
-
-```text
+        |
+        v
 statistics storage
+        |
+        v
 baseline handling
+        |
+        v
 real_beacon_skip calculation
+        |
+        v
 Beacon Recovery
 ```
 
 The protected WF200 implementation has not been fully reverse engineered.
-Where that boundary matters, it is stated explicitly rather than inferred from
-the host-side code.
 
-No original firmware image, modified firmware image, complete proprietary
-function, or large raw disassembly is published in this document.
+Where the host/radio boundary matters, unresolved radio-internal behavior is explicitly identified rather than inferred.
+
+Historical build identities are preserved.
+
+No historical A1 data are relabeled A1R or B2.1.
 
 ---
 
-## Disclaimer
+# Disclaimer
 
 This is an independent research project.
 
-It is not affiliated with, endorsed by, or supported by Shelly Group or
-Silicon Labs.
+It is not affiliated with, endorsed by, or supported by Shelly Group or Silicon Labs.
 
-All product names and trademarks belong to their respective owners.
+The documented behavior refers to the firmware versions and experimental devices tested in this project.
 
-The documented behavior refers to the firmware versions and devices tested in
-this project.
+No proprietary firmware image or large raw disassembly is reproduced here.

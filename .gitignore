@@ -182,3 +182,11 @@ tools/scripts/analyze/build_patched_gbl.py
 # Internal research / REA build artifacts
 builds/
 build_*/
+
+# ============================================================
+# Local research archive / runtime captures
+# ============================================================
+
+tools/scripts/analyze/status_*.json
+tools/scripts/analyze/request.sh
+archive/
